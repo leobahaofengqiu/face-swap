@@ -11,9 +11,8 @@ from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from PIL import Image, ImageEnhance, ImageFilter, ImageOps
+from PIL import Image, ImageEnhance, ImageFilter
 import numpy as np
-import cv2
 from cachetools import TTLCache
 from gradio_client import Client, handle_file
 from retry import retry
@@ -26,7 +25,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Enhanced Face Swap API", version="2.4.2")
+app = FastAPI(title="High-Quality Face Swap API", version="2.3.0")
 
 # CORS configuration
 app.add_middleware(
@@ -38,20 +37,18 @@ app.add_middleware(
     expose_headers=["X-Process-Time"],
 )
 
-# Configuration optimized for Railway deployment
+# Configuration optimized for high quality
 CONFIG = {
     "UPLOAD_FOLDER": os.getenv("UPLOAD_FOLDER", "static/uploads"),
     "OUTPUT_FOLDER": os.getenv("OUTPUT_FOLDER", "static/output"),
     "STATIC_DIR": "static",
     "ALLOWED_EXTENSIONS": {'png', 'jpg', 'jpeg'},
-    "MAX_FILE_SIZE": int(os.getenv("MAX_FILE_SIZE", 30 * 1024 * 1024)),  # 30MB
+    "MAX_FILE_SIZE": int(os.getenv("MAX_FILE_SIZE", 30 * 1024 * 1024)),  # Increased to 30MB
     "CACHE_TTL": int(os.getenv("CACHE_TTL", 7200)),  # 2 hours
     "MAX_CACHE_SIZE": int(os.getenv("MAX_CACHE_SIZE", 100)),
     "CLEANUP_INTERVAL": int(os.getenv("CLEANUP_INTERVAL", 3600)),
-    "QUALITY": int(os.getenv("QUALITY", 100)),  # Maximum quality
-    "PRESERVE_RESOLUTION": os.getenv("PRESERVE_RESOLUTION", "True") == "True",
-    "BLENDING_ALPHA": float(os.getenv("BLENDING_ALPHA", 0.85)),
-    "FACE_CONFIDENCE": float(os.getenv("FACE_CONFIDENCE", 0.5)),
+    "QUALITY": int(os.getenv("QUALITY", 98)),  # Increased quality
+    "PRESERVE_RESOLUTION": True  # Flag to preserve original resolution
 }
 
 # Create directories
@@ -82,16 +79,6 @@ cache = TTLCache(maxsize=CONFIG["MAX_CACHE_SIZE"], ttl=CONFIG["CACHE_TTL"])
 # Progress tracking
 progress_tracker: Dict[str, str] = {}
 
-# Initialize OpenCV DNN face detector
-try:
-    net = cv2.dnn.readNetFromCaffe(
-        "models/deploy.prototxt",
-        "models/res10_300x300_ssd_iter_140000.caffemodel"
-    )
-except Exception as e:
-    logger.error(f"Failed to load DNN model: {str(e)}")
-    raise
-
 def allowed_file(filename: str) -> bool:
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in CONFIG["ALLOWED_EXTENSIONS"]
 
@@ -107,77 +94,30 @@ def validate_image(file_path: str) -> bool:
 def get_file_hash(file_content: bytes) -> str:
     return hashlib.sha256(file_content).hexdigest()
 
-def detect_faces(image_path: str) -> list:
-    """Detect faces using OpenCV DNN-based face detector."""
-    try:
-        img = cv2.imread(image_path)
-        if img is None:
-            raise ValueError("Failed to load image")
-        
-        h, w = img.shape[:2]
-        blob = cv2.dnn.blobFromImage(cv2.resize(img, (300, 300)), 1.0, (300, 300), (104.0, 177.0, 123.0))
-        net.setInput(blob)
-        detections = net.forward()
-        
-        faces = []
-        for i in range(detections.shape[2]):
-            confidence = detections[0, 0, i, 2]
-            if confidence > CONFIG["FACE_CONFIDENCE"]:
-                box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
-                (startX, startY, endX, endY) = box.astype("int")
-                faces.append((startY, endX, endY, startX))  # (top, right, bottom, left)
-        return faces
-    except Exception as e:
-        logger.error(f"Face detection failed: {str(e)}")
-        return []
-
-def color_match(source: Image.Image, target: Image.Image) -> Image.Image:
-    """Match the color histogram of the source image to the target image."""
-    try:
-        source_np = np.array(source)
-        target_np = np.array(target)
-        matched = np.zeros_like(source_np)
-        for channel in range(3):
-            matched[:, :, channel] = cv2.equalizeHist(source_np[:, :, channel])
-        return Image.fromarray(cv2.matchHistograms(matched, target_np, method=cv2.HISTCMP_CORREL))
-    except Exception as e:
-        logger.error(f"Color matching failed: {str(e)}")
-        return source
-
-def seamless_clone(source: Image.Image, target: Image.Image, face_location: tuple) -> Image.Image:
-    """Apply seamless cloning for natural face integration."""
-    try:
-        source_np = np.array(source)
-        target_np = np.array(target)
-        mask = np.ones_like(source_np) * 255
-        center = (face_location[1] + (face_location[3] - face_location[1]) // 2,
-                  face_location[0] + (face_location[2] - face_location[0]) // 2)
-        result = cv2.seamlessClone(source_np, target_np, mask, center, cv2.NORMAL_CLONE)
-        return Image.fromarray(result)
-    except Exception as e:
-        logger.error(f"Seamless cloning failed: {str(e)}")
-        return source
-
 def high_quality_preprocess(content: bytes) -> bytes:
-    """Preprocess images with advanced techniques for clarity and detail."""
+    """Preprocess images with focus on preserving clarity."""
     try:
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as temp_file:
             temp_file.write(content)
             temp_file_path = temp_file.name
         
         with Image.open(temp_file_path) as img:
+            # Convert to RGB
             if img.mode != 'RGB':
                 img = img.convert('RGB')
             
+            # Preserve original resolution if configured
             if CONFIG["PRESERVE_RESOLUTION"]:
-                img = img.copy()
+                img = img.copy()  # Avoid resizing
             else:
-                img.thumbnail((2560, 2560), Image.Resampling.LANCZOS)
+                original_size = img.size
+                img.thumbnail((1920, 1920), Image.Resampling.LANCZOS)
+                if img.size != original_size:
+                    img = img.resize(original_size, Image.Resampling.LANCZOS)
             
-            img = ImageEnhance.Color(img).enhance(1.1)
-            img = ImageEnhance.Contrast(img).enhance(1.05)
-            img = ImageEnhance.Brightness(img).enhance(1.03)
-            img = img.filter(ImageFilter.UnsharpMask(radius=0.5, percent=100, threshold=1))
+            # Minimal enhancements to preserve details
+            img = ImageEnhance.Color(img).enhance(1.05)
+            img = ImageEnhance.Contrast(img).enhance(1.02)
             
             with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as output_file:
                 img.save(
@@ -198,23 +138,26 @@ def high_quality_preprocess(content: bytes) -> bytes:
         return content
 
 def high_quality_enhance(image_path: str, enhancements: Dict[str, float] = None) -> None:
-    """Apply advanced enhancements for natural-looking results."""
+    """Apply high-quality image enhancements with focus on clarity."""
     try:
         enhancements = enhancements or {
-            "sharpness": 1.3,
-            "contrast": 1.15,
+            "sharpness": 1.5,  # Reduced to avoid over-sharpening
+            "contrast": 1.1,
             "brightness": 1.05,
             "color": 1.1
         }
         
         with Image.open(image_path) as img:
+            # Apply gentle enhancements
             img = ImageEnhance.Sharpness(img).enhance(enhancements["sharpness"])
             img = ImageEnhance.Contrast(img).enhance(enhancements["contrast"])
             img = ImageEnhance.Brightness(img).enhance(enhancements["brightness"])
             img = ImageEnhance.Color(img).enhance(enhancements["color"])
-            img = img.filter(ImageFilter.UnsharpMask(radius=0.7, percent=110, threshold=1))
-            img = ImageOps.autocontrast(img)
             
+            # Minimal noise reduction
+            img = img.filter(ImageFilter.UnsharpMask(radius=0.8, percent=120, threshold=1))
+            
+            # Save with maximum quality
             img.save(
                 image_path,
                 "PNG",
@@ -236,29 +179,20 @@ async def cleanup_output_folder():
     except Exception as e:
         logger.error(f"Output folder cleanup failed: {str(e)}")
 
-@retry(tries=3, delay=1, backoff=2, exceptions=(Exception,))
+@retry(tries=5, delay=2, backoff=2, exceptions=(Exception,))
 async def face_swap(
     source_image: str,
     dest_image: str,
-    source_face_idx: int = 0,
-    dest_face_idx: int = 0,
+    source_face_idx: int = 1,
+    dest_face_idx: int = 1,
     task_id: str = None
 ) -> str:
     try:
         if not all([validate_image(source_image), validate_image(dest_image)]):
             raise ValueError("Invalid input files")
 
-        # Detect faces to validate indices
-        source_faces = detect_faces(source_image)
-        dest_faces = detect_faces(dest_image)
-
-        if not source_faces or not dest_faces:
-            raise ValueError("No faces detected in one or both images")
-        if source_face_idx >= len(source_faces) or dest_face_idx >= len(dest_faces):
-            raise ValueError("Invalid face index provided")
-
-        progress_tracker[task_id] = "Initializing face swap with InsightFace model"
-        client = Client("alihassanml/InsightFace-FaceSwap")
+        progress_tracker[task_id] = "Initializing face swap"
+        client = Client("Dentro/face-swap")
         
         progress_tracker[task_id] = "Processing high-quality face swap"
         result = client.predict(
@@ -270,23 +204,29 @@ async def face_swap(
         )
 
         if not result or not os.path.exists(result):
-            raise ValueError("Face swap failed to produce a valid result")
+            logger.warning(f"Initial face swap attempt failed with indices {source_face_idx}, {dest_face_idx}")
+            # Fallback with different face indices
+            for idx in [0, 2]:
+                if source_face_idx != idx:
+                    result = client.predict(
+                        sourceImage=handle_file(source_image),
+                        sourceFaceIndex=idx,
+                        destinationImage=handle_file(dest_image),
+                        destinationFaceIndex=dest_face_idx,
+                        api_name="/predict"
+                    )
+                    if result and os.path.exists(result):
+                        logger.info(f"Successful fallback with source index {idx}")
+                        break
+            if not result or not os.path.exists(result):
+                raise ValueError("All face swap attempts failed")
 
         unique_filename = f"face_swap_{uuid.uuid4().hex}.png"
         output_path = os.path.join(CONFIG["OUTPUT_FOLDER"], unique_filename)
         
-        progress_tracker[task_id] = "Applying advanced post-processing"
+        progress_tracker[task_id] = "Applying high-quality enhancements"
         with Image.open(result) as img:
             img = img.convert("RGB")
-            target_img = Image.open(dest_image).convert("RGB")
-            
-            # Color matching
-            img = color_match(img, target_img)
-            
-            # Seamless cloning
-            face_location = dest_faces[dest_face_idx]
-            img = seamless_clone(img, target_img, face_location)
-            
             img.save(
                 output_path,
                 "PNG",
@@ -294,7 +234,6 @@ async def face_swap(
                 optimize=True,
                 progressive=True
             )
-        
         high_quality_enhance(output_path)
         
         progress_tracker[task_id] = "Completed"
@@ -306,24 +245,17 @@ async def face_swap(
 
 @app.get("/", description="Render the index page for the face-swap UI")
 async def index(request: Request):
-    try:
-        return templates.TemplateResponse(
-            "index.html",
-            {"request": request, "result_image": None, "version": app.version}
-        )
-    except Exception as e:
-        logger.error(f"Failed to render index page: {str(e)}")
-        return JSONResponse(
-            {"success": False, "error": "UI not available", "data": None},
-            status_code=503
-        )
+    return templates.TemplateResponse(
+        "index.html",
+        {"request": request, "result_image": None, "version": app.version}
+    )
 
 @app.post("/swap", description="Upload images for high-quality face-swapping")
 async def swap_faces(
     source_image: UploadFile = File(...),
     dest_image: UploadFile = File(...),
-    source_face_idx: int = 0,
-    dest_face_idx: int = 0,
+    source_face_idx: int = 1,
+    dest_face_idx: int = 1,
     background_tasks: BackgroundTasks = None
 ):
     start_time = time.time()
