@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Face Swap</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        h1 {
+            text-align: center;
+        }
+        form {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+        button {
+            padding: 10px;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        #result, #error {
+            margin-top: 20px;
+        }
+        #error {
+            color: red;
+        }
+        img {
+            max-width: 100%;
+            border: 1px solid #ddd;
+        }
+        .loader {
+            display: none;
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #007bff;
+            border-radius: 50%;
+            width: 30px;
+            height: 30px;
+            animation: spin 1s linear infinite;
+            margin: 20px auto;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <h1>Face Swap Application</h1>
+    <form id="swap-form">
+        <label for="source_image">Source Image:</label>
+        <input type="file" id="source_image" name="source_image" accept="image/png,image/jpeg" required><br><br>
+        <label for="dest_image">Destination Image:</label>
+        <input type="file" id="dest_image" name="dest_image" accept="image/png,image/jpeg" required><br><br>
+        <button type="submit">Swap Faces</button>
+    </form>
+    <div id="loader" class="loader"></div>
+    <div id="result"></div>
+    <div id="error"></div>
+
+    <script>
+        document.getElementById('swap-form').addEventListener('submit', async (event) => {
+            event.preventDefault(); // Prevent form reload
+            console.log('Form submitted');
+
+            const formData = new FormData();
+            formData.append('source_image', document.getElementById('source_image').files[0]);
+            formData.append('dest_image', document.getElementById('dest_image').files[0]);
+
+            const resultDiv = document.getElementById('result');
+            const errorDiv = document.getElementById('error');
+            const loader = document.getElementById('loader');
+            resultDiv.innerHTML = '';
+            errorDiv.textContent = '';
+            loader.style.display = 'block'; // Show loader
+
+            try {
+                console.log('Sending request to /swap');
+                const response = await fetch('/swap', {
+                    method: 'POST',
+                    body: formData
+                });
+                console.log('Response received:', response.status);
+                const data = await response.json();
+                console.log('Response data:', data);
+
+                if (data.success) {
+                    resultDiv.innerHTML = `<h2>Result:</h2><img src="${data.data.result_image}" alt="Face Swap Result">`;
+                } else {
+                    errorDiv.textContent = `Error: ${data.error}`;
+                    console.error('API error:', data.error);
+                }
+            } catch (error) {
+                errorDiv.textContent = `Request failed: ${error.message}`;
+                console.error('Fetch error:', error);
+            } finally {
+                loader.style.display = 'none'; // Hide loader
+            }
+        });
+    </script>
+</body>
+</html>
