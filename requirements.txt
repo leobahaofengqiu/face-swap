@@ -9,4 +9,4 @@ retry
 slowapi
 numpy
 opencv-python
-face_recognition
+jinja2
