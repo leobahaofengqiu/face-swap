@@ -17,7 +17,6 @@ from cachetools import TTLCache
 from gradio_client import Client, handle_file
 from retry import retry
 import asyncio
-import face_recognition  # Added for face detection
 
 # Configure logging with detailed output
 logging.basicConfig(
@@ -26,7 +25,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="High-Quality Face Swap API", version="2.2.0")
+app = FastAPI(title="High-Quality Face Swap API", version="2.2.1")
 
 # CORS configuration
 app.add_middleware(
@@ -90,16 +89,6 @@ def validate_image(file_path: str) -> bool:
         return file_path.lower().endswith(('.png', '.jpg', '.jpeg'))
     except Exception as e:
         logger.error(f"Image validation failed: {str(e)}")
-        return False
-
-def detect_faces(image_path: str) -> bool:
-    """Detect if there’s at least one face in the image."""
-    try:
-        image = face_recognition.load_image_file(image_path)
-        face_locations = face_recognition.face_locations(image)
-        return len(face_locations) > 0
-    except Exception as e:
-        logger.error(f"Face detection failed: {str(e)}")
         return False
 
 def get_file_hash(file_content: bytes) -> str:
@@ -199,8 +188,6 @@ async def face_swap(
     try:
         if not all([validate_image(source_image), validate_image(dest_image)]):
             raise ValueError("Invalid input files")
-        if not all([detect_faces(source_image), detect_faces(dest_image)]):
-            raise ValueError("No detectable faces in one or both images")
 
         progress_tracker[task_id] = "Initializing face swap"
         client = Client("Dentro/face-swap")
