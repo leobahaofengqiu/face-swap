@@ -11,7 +11,7 @@ from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from PIL import Image, ImageEnhance, ImageFilter, ImageOps
+from PIL import Image, ImageEnhance, ImageFilter
 import numpy as np
 from cachetools import TTLCache
 from gradio_client import Client, handle_file
@@ -25,7 +25,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="High-Quality Face Swap API", version="2.2.1")
+app = FastAPI(title="High-Quality Face Swap API", version="2.3.0")
 
 # CORS configuration
 app.add_middleware(
@@ -43,12 +43,12 @@ CONFIG = {
     "OUTPUT_FOLDER": os.getenv("OUTPUT_FOLDER", "static/output"),
     "STATIC_DIR": "static",
     "ALLOWED_EXTENSIONS": {'png', 'jpg', 'jpeg'},
-    "MAX_FILE_SIZE": int(os.getenv("MAX_FILE_SIZE", 20 * 1024 * 1024)),  # 20MB
+    "MAX_FILE_SIZE": int(os.getenv("MAX_FILE_SIZE", 30 * 1024 * 1024)),  # Increased to 30MB
     "CACHE_TTL": int(os.getenv("CACHE_TTL", 7200)),  # 2 hours
     "MAX_CACHE_SIZE": int(os.getenv("MAX_CACHE_SIZE", 100)),
     "CLEANUP_INTERVAL": int(os.getenv("CLEANUP_INTERVAL", 3600)),
-    "MAX_RESOLUTION": int(os.getenv("MAX_RESOLUTION", 1920)),  # Higher resolution limit
-    "QUALITY": int(os.getenv("QUALITY", 95)),  # Higher quality compression
+    "QUALITY": int(os.getenv("QUALITY", 98)),  # Increased quality
+    "PRESERVE_RESOLUTION": True  # Flag to preserve original resolution
 }
 
 # Create directories
@@ -94,8 +94,8 @@ def validate_image(file_path: str) -> bool:
 def get_file_hash(file_content: bytes) -> str:
     return hashlib.sha256(file_content).hexdigest()
 
-def high_quality_preprocess(content: bytes, max_resolution: int = CONFIG["MAX_RESOLUTION"]) -> bytes:
-    """Preprocess images with focus on preserving facial details."""
+def high_quality_preprocess(content: bytes) -> bytes:
+    """Preprocess images with focus on preserving clarity."""
     try:
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as temp_file:
             temp_file.write(content)
@@ -106,15 +106,18 @@ def high_quality_preprocess(content: bytes, max_resolution: int = CONFIG["MAX_RE
             if img.mode != 'RGB':
                 img = img.convert('RGB')
             
-            # Smart resize maintaining aspect ratio and facial details
-            original_size = img.size
-            img.thumbnail((max_resolution, max_resolution), Image.Resampling.LANCZOS)
-            if img.size != original_size:  # Only apply if resized
-                img = img.resize(original_size, Image.Resampling.LANCZOS)  # Restore original size with better resampling
+            # Preserve original resolution if configured
+            if CONFIG["PRESERVE_RESOLUTION"]:
+                img = img.copy()  # Avoid resizing
+            else:
+                original_size = img.size
+                img.thumbnail((1920, 1920), Image.Resampling.LANCZOS)
+                if img.size != original_size:
+                    img = img.resize(original_size, Image.Resampling.LANCZOS)
             
-            # Subtle enhancements to preserve details
-            img = ImageEnhance.Color(img).enhance(1.1)
-            img = ImageEnhance.Contrast(img).enhance(1.05)
+            # Minimal enhancements to preserve details
+            img = ImageEnhance.Color(img).enhance(1.05)
+            img = ImageEnhance.Contrast(img).enhance(1.02)
             
             with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as output_file:
                 img.save(
@@ -135,27 +138,26 @@ def high_quality_preprocess(content: bytes, max_resolution: int = CONFIG["MAX_RE
         return content
 
 def high_quality_enhance(image_path: str, enhancements: Dict[str, float] = None) -> None:
-    """Apply high-quality image enhancements with focus on facial clarity."""
+    """Apply high-quality image enhancements with focus on clarity."""
     try:
         enhancements = enhancements or {
-            "sharpness": 2.0,  # Reduced for better facial blending
-            "contrast": 1.2,
-            "brightness": 1.1,
-            "color": 1.15
+            "sharpness": 1.5,  # Reduced to avoid over-sharpening
+            "contrast": 1.1,
+            "brightness": 1.05,
+            "color": 1.1
         }
         
         with Image.open(image_path) as img:
-            # Apply enhancements
+            # Apply gentle enhancements
             img = ImageEnhance.Sharpness(img).enhance(enhancements["sharpness"])
             img = ImageEnhance.Contrast(img).enhance(enhancements["contrast"])
             img = ImageEnhance.Brightness(img).enhance(enhancements["brightness"])
             img = ImageEnhance.Color(img).enhance(enhancements["color"])
             
-            # Gentle noise reduction and detail enhancement
-            img = img.filter(ImageFilter.UnsharpMask(radius=1.0, percent=150, threshold=2))
-            img = img.filter(ImageFilter.DETAIL)
+            # Minimal noise reduction
+            img = img.filter(ImageFilter.UnsharpMask(radius=0.8, percent=120, threshold=1))
             
-            # Save with high quality
+            # Save with maximum quality
             img.save(
                 image_path,
                 "PNG",
@@ -202,9 +204,9 @@ async def face_swap(
         )
 
         if not result or not os.path.exists(result):
-            logger.warning("Initial face swap attempt failed, trying fallback")
+            logger.warning(f"Initial face swap attempt failed with indices {source_face_idx}, {dest_face_idx}")
             # Fallback with different face indices
-            for idx in [0, 2]:  # Try adjacent face indices
+            for idx in [0, 2]:
                 if source_face_idx != idx:
                     result = client.predict(
                         sourceImage=handle_file(source_image),
@@ -214,6 +216,7 @@ async def face_swap(
                         api_name="/predict"
                     )
                     if result and os.path.exists(result):
+                        logger.info(f"Successful fallback with source index {idx}")
                         break
             if not result or not os.path.exists(result):
                 raise ValueError("All face swap attempts failed")
@@ -237,7 +240,7 @@ async def face_swap(
         return output_path
     except Exception as e:
         progress_tracker[task_id] = f"Error: {str(e)}"
-        logger.error(f"Face swap failed: {str(e)}")
+        logger.error(f"Face swap failed: {str(e)} with files {source_image}, {dest_image}")
         raise
 
 @app.get("/", description="Render the index page for the face-swap UI")
