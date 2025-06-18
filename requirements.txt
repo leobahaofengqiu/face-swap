@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+gradio-client
+pillow
+cachetools
+python-multipart
+jinja2
+retry
+slowapi
