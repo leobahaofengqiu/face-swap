@@ -138,26 +138,28 @@ def high_quality_preprocess(content: bytes) -> bytes:
         return content
 
 def high_quality_enhance(image_path: str, enhancements: Dict[str, float] = None) -> None:
-    """Apply high-quality image enhancements with focus on clarity."""
+    """Apply high-quality image enhancements with a focus on natural clarity and HD output."""
     try:
         enhancements = enhancements or {
-            "sharpness": 1.5,  # Reduced to avoid over-sharpening
-            "contrast": 1.1,
-            "brightness": 1.05,
-            "color": 1.1
+            "sharpness": 1.15,   # Slightly sharpened for clarity without artifacts
+            "contrast": 1.02,    # Soft contrast to avoid harsh tones
+            "brightness": 1.03,  # Slightly brighter
+            "color": 1.05        # Mild color boost
         }
-        
+
         with Image.open(image_path) as img:
-            # Apply gentle enhancements
+            img = img.convert("RGB")
+
+            # Apply subtle, natural-looking enhancements
             img = ImageEnhance.Sharpness(img).enhance(enhancements["sharpness"])
             img = ImageEnhance.Contrast(img).enhance(enhancements["contrast"])
             img = ImageEnhance.Brightness(img).enhance(enhancements["brightness"])
             img = ImageEnhance.Color(img).enhance(enhancements["color"])
-            
-            # Minimal noise reduction
-            img = img.filter(ImageFilter.UnsharpMask(radius=0.8, percent=120, threshold=1))
-            
-            # Save with maximum quality
+
+            # Optional: Apply a light unsharp mask for mild crispness
+            img = img.filter(ImageFilter.UnsharpMask(radius=1.0, percent=100, threshold=3))
+
+            # Save as HD (PNG with max quality)
             img.save(
                 image_path,
                 "PNG",
