@@ -18,14 +18,14 @@ from gradio_client import Client, handle_file
 from retry import retry
 import asyncio
 
-# Configure logging
+# Configure logging with detailed output
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="HD Face Swap API", version="2.4.0")
+app = FastAPI(title="High-Quality Face Swap API", version="2.3.0")
 
 # CORS configuration
 app.add_middleware(
@@ -37,19 +37,18 @@ app.add_middleware(
     expose_headers=["X-Process-Time"],
 )
 
-# Configuration optimized for HD output
+# Configuration optimized for high quality
 CONFIG = {
     "UPLOAD_FOLDER": os.getenv("UPLOAD_FOLDER", "static/uploads"),
     "OUTPUT_FOLDER": os.getenv("OUTPUT_FOLDER", "static/output"),
     "STATIC_DIR": "static",
     "ALLOWED_EXTENSIONS": {'png', 'jpg', 'jpeg'},
-    "MAX_FILE_SIZE": int(os.getenv("MAX_FILE_SIZE", 50 * 1024 * 1024)),  # Increased to 50MB for HD
+    "MAX_FILE_SIZE": int(os.getenv("MAX_FILE_SIZE", 30 * 1024 * 1024)),  # Increased to 30MB
     "CACHE_TTL": int(os.getenv("CACHE_TTL", 7200)),  # 2 hours
-    "MAX_CACHE_SIZE": int(os.getenv("MAX_CACHE_SIZE", 50)),  # Reduced for HD files
+    "MAX_CACHE_SIZE": int(os.getenv("MAX_CACHE_SIZE", 100)),
     "CLEANUP_INTERVAL": int(os.getenv("CLEANUP_INTERVAL", 3600)),
-    "QUALITY": 100,  # Lossless for HD
-    "MAX_RESOLUTION": (3840, 2160),  # Support up to 4K
-    "PRESERVE_RESOLUTION": True
+    "QUALITY": int(os.getenv("QUALITY", 98)),  # Increased quality
+    "PRESERVE_RESOLUTION": True  # Flag to preserve original resolution
 }
 
 # Create directories
@@ -87,9 +86,6 @@ def validate_image(file_path: str) -> bool:
     try:
         with Image.open(file_path) as img:
             img.verify()
-            if img.size[0] > CONFIG["MAX_RESOLUTION"][0] or img.size[1] > CONFIG["MAX_RESOLUTION"][1]:
-                logger.warning(f"Image resolution {img.size} exceeds max {CONFIG['MAX_RESOLUTION']}")
-                return False
         return file_path.lower().endswith(('.png', '.jpg', '.jpeg'))
     except Exception as e:
         logger.error(f"Image validation failed: {str(e)}")
@@ -99,31 +95,35 @@ def get_file_hash(file_content: bytes) -> str:
     return hashlib.sha256(file_content).hexdigest()
 
 def high_quality_preprocess(content: bytes) -> bytes:
-    """Preprocess images for HD output with minimal compression."""
+    """Preprocess images with focus on preserving clarity."""
     try:
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as temp_file:
             temp_file.write(content)
             temp_file_path = temp_file.name
         
         with Image.open(temp_file_path) as img:
+            # Convert to RGB
             if img.mode != 'RGB':
                 img = img.convert('RGB')
             
-            # Cap resolution to 4K while preserving aspect ratio
+            # Preserve original resolution if configured
             if CONFIG["PRESERVE_RESOLUTION"]:
-                if img.size[0] > CONFIG["MAX_RESOLUTION"][0] or img.size[1] > CONFIG["MAX_RESOLUTION"][1]:
-                    img.thumbnail(CONFIG["MAX_RESOLUTION"], Image.Resampling.LANCZOS)
+                img = img.copy()  # Avoid resizing
+            else:
+                original_size = img.size
+                img.thumbnail((1920, 1920), Image.Resampling.LANCZOS)
+                if img.size != original_size:
+                    img = img.resize(original_size, Image.Resampling.LANCZOS)
             
-            # Subtle enhancements for HD clarity
-            img = ImageEnhance.Sharpness(img).enhance(1.2)
-            img = ImageEnhance.Contrast(img).enhance(1.05)
-            img = ImageEnhance.Brightness(img).enhance(1.03)
+            # Minimal enhancements to preserve details
+            img = ImageEnhance.Color(img).enhance(1.05)
+            img = ImageEnhance.Contrast(img).enhance(1.02)
             
             with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as output_file:
                 img.save(
                     output_file.name,
                     "PNG",
-                    optimize=False,  # Lossless for HD
+                    optimize=True,
                     quality=CONFIG["QUALITY"],
                     progressive=True
                 )
@@ -135,41 +135,40 @@ def high_quality_preprocess(content: bytes) -> bytes:
         return result
     except Exception as e:
         logger.error(f"Image preprocessing failed: {str(e)}")
-        raise HTTPException(400, detail=f"Preprocessing failed: {str(e)}")
+        return content
 
 def high_quality_enhance(image_path: str, enhancements: Dict[str, float] = None) -> None:
-    """Apply HD enhancements for natural clarity."""
+    """Apply high-quality image enhancements with a focus on natural clarity and HD output."""
     try:
         enhancements = enhancements or {
-            "sharpness": 1.3,    # Increased for HD clarity
-            "contrast": 1.06,    # Stronger contrast for detail
-            "brightness": 1.04,  # Subtle brightness boost
-            "color": 1.05        # Natural color enhancement
+            "sharpness": 1.15,   # Slightly sharpened for clarity without artifacts
+            "contrast": 1.02,    # Soft contrast to avoid harsh tones
+            "brightness": 1.03,  # Slightly brighter
+            "color": 1.05        # Mild color boost
         }
 
         with Image.open(image_path) as img:
             img = img.convert("RGB")
-            
-            # Apply enhancements
+
+            # Apply subtle, natural-looking enhancements
             img = ImageEnhance.Sharpness(img).enhance(enhancements["sharpness"])
             img = ImageEnhance.Contrast(img).enhance(enhancements["contrast"])
             img = ImageEnhance.Brightness(img).enhance(enhancements["brightness"])
             img = ImageEnhance.Color(img).enhance(enhancements["color"])
-            
-            # Apply unsharp mask for crispness
-            img = img.filter(ImageFilter.UnsharpMask(radius=0.8, percent=120, threshold=2))
-            
-            # Save as HD
+
+            # Optional: Apply a light unsharp mask for mild crispness
+            img = img.filter(ImageFilter.UnsharpMask(radius=1.0, percent=100, threshold=3))
+
+            # Save as HD (PNG with max quality)
             img.save(
                 image_path,
                 "PNG",
-                optimize=False,
+                optimize=True,
                 quality=CONFIG["QUALITY"],
                 progressive=True
             )
     except Exception as e:
         logger.error(f"Image enhancement failed: {str(e)}")
-        raise HTTPException(500, detail=f"Enhancement failed: {str(e)}")
 
 async def cleanup_output_folder():
     try:
@@ -182,7 +181,7 @@ async def cleanup_output_folder():
     except Exception as e:
         logger.error(f"Output folder cleanup failed: {str(e)}")
 
-@retry(tries=3, delay=2, backoff=2, exceptions=(Exception,))
+@retry(tries=5, delay=2, backoff=2, exceptions=(Exception,))
 async def face_swap(
     source_image: str,
     dest_image: str,
@@ -192,12 +191,12 @@ async def face_swap(
 ) -> str:
     try:
         if not all([validate_image(source_image), validate_image(dest_image)]):
-            raise ValueError("Invalid input images or resolution exceeds 4K")
+            raise ValueError("Invalid input files")
 
         progress_tracker[task_id] = "Initializing face swap"
         client = Client("Dentro/face-swap")
         
-        progress_tracker[task_id] = "Processing HD face swap"
+        progress_tracker[task_id] = "Processing high-quality face swap"
         result = client.predict(
             sourceImage=handle_file(source_image),
             sourceFaceIndex=source_face_idx,
@@ -207,7 +206,8 @@ async def face_swap(
         )
 
         if not result or not os.path.exists(result):
-            logger.warning(f"Initial face swap failed with indices {source_face_idx}, {dest_face_idx}")
+            logger.warning(f"Initial face swap attempt failed with indices {source_face_idx}, {dest_face_idx}")
+            # Fallback with different face indices
             for idx in [0, 2]:
                 if source_face_idx != idx:
                     result = client.predict(
@@ -226,16 +226,14 @@ async def face_swap(
         unique_filename = f"face_swap_{uuid.uuid4().hex}.png"
         output_path = os.path.join(CONFIG["OUTPUT_FOLDER"], unique_filename)
         
-        progress_tracker[task_id] = "Applying HD enhancements"
+        progress_tracker[task_id] = "Applying high-quality enhancements"
         with Image.open(result) as img:
             img = img.convert("RGB")
-            if img.size[0] > CONFIG["MAX_RESOLUTION"][0] or img.size[1] > CONFIG["MAX_RESOLUTION"][1]:
-                img.thumbnail(CONFIG["MAX_RESOLUTION"], Image.Resampling.LANCZOS)
             img.save(
                 output_path,
                 "PNG",
                 quality=CONFIG["QUALITY"],
-                optimize=False,
+                optimize=True,
                 progressive=True
             )
         high_quality_enhance(output_path)
@@ -245,7 +243,7 @@ async def face_swap(
     except Exception as e:
         progress_tracker[task_id] = f"Error: {str(e)}"
         logger.error(f"Face swap failed: {str(e)} with files {source_image}, {dest_image}")
-        raise HTTPException(500, detail=f"Face swap failed: {str(e)}")
+        raise
 
 @app.get("/", description="Render the index page for the face-swap UI")
 async def index(request: Request):
@@ -254,7 +252,7 @@ async def index(request: Request):
         {"request": request, "result_image": None, "version": app.version}
     )
 
-@app.post("/swap", description="Upload images for HD face-swapping")
+@app.post("/swap", description="Upload images for high-quality face-swapping")
 async def swap_faces(
     source_image: UploadFile = File(...),
     dest_image: UploadFile = File(...),
@@ -265,7 +263,7 @@ async def swap_faces(
     start_time = time.time()
     task_id = str(uuid.uuid4())
     progress_tracker[task_id] = "Starting"
-    logger.info(f"Starting HD face swap task: {task_id}")
+    logger.info(f"Starting high-quality face swap task: {task_id}")
 
     try:
         # Validate inputs
@@ -284,20 +282,8 @@ async def swap_faces(
                 detail=f"File size exceeds {CONFIG['MAX_FILE_SIZE'] / (1024 * 1024)}MB"
             )
 
-        # Validate image content
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as temp_source:
-            temp_source.write(source_content)
-            if not validate_image(temp_source.name):
-                raise HTTPException(400, detail="Invalid source image or resolution exceeds 4K")
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as temp_dest:
-            temp_dest.write(dest_content)
-            if not validate_image(temp_dest.name):
-                raise HTTPException(400, detail="Invalid destination image or resolution exceeds 4K")
-        os.unlink(temp_source.name)
-        os.unlink(temp_dest.name)
-
-        # HD preprocessing
-        progress_tracker[task_id] = "Preprocessing images for HD quality"
+        # High-quality preprocessing
+        progress_tracker[task_id] = "Preprocessing images for high quality"
         source_content = high_quality_preprocess(source_content)
         dest_content = high_quality_preprocess(dest_content)
 
@@ -317,8 +303,8 @@ async def swap_faces(
 
         # Save temporary files
         with tempfile.TemporaryDirectory() as temp_dir:
-            source_filename = f"source_{uuid.uuid4().hex}.png"
-            dest_filename = f"dest_{uuid.uuid4().hex}.png"
+            source_filename = f"source_{uuid.uuid4().hex}.{source_image.filename.rsplit('.', 1)[1]}"
+            dest_filename = f"dest_{uuid.uuid4().hex}.{dest_image.filename.rsplit('.', 1)[1]}"
             source_path = os.path.join(temp_dir, source_filename)
             dest_path = os.path.join(temp_dir, dest_filename)
 
@@ -330,7 +316,7 @@ async def swap_faces(
             # Perform face swap
             result = await face_swap(source_path, dest_path, source_face_idx, dest_face_idx, task_id)
             cache[cache_key] = result
-            logger.info(f"Cached HD result: {result}")
+            logger.info(f"Cached high-quality result: {result}")
 
             # Schedule cleanup
             background_tasks.add_task(cleanup_output_folder)
@@ -341,12 +327,10 @@ async def swap_faces(
                 "error": None
             }, headers={"X-Process-Time": f"{time.time() - start_time:.2f}"})
 
-    except HTTPException as e:
-        raise e
     except Exception as e:
         logger.error(f"Face swap error: {str(e)}")
         progress_tracker[task_id] = f"Error: {str(e)}"
-        raise HTTPException(500, detail=f"Processing failed: {str(e)}")
+        raise HTTPException(500, detail=str(e))
 
 @app.get("/progress/{task_id}", description="Check progress of face swap task")
 async def get_progress(task_id: str):
