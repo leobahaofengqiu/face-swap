@@ -10,3 +10,4 @@ slowapi
 numpy
 opencv-python
 jinja2
+realesrgan
