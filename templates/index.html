@@ -19,6 +19,13 @@
             flex-direction: column;
             gap: 15px;
         }
+        label {
+            font-weight: bold;
+        }
+        input[type="file"], input[type="number"] {
+            padding: 5px;
+            font-size: 16px;
+        }
         button {
             padding: 10px;
             background-color: #007bff;
@@ -59,10 +66,14 @@
 <body>
     <h1>Face Swap Application</h1>
     <form id="swap-form">
-        <label for="source_image">Source Image:</label>
-        <input type="file" id="source_image" name="source_image" accept="image/png,image/jpeg" required><br><br>
-        <label for="dest_image">Destination Image:</label>
-        <input type="file" id="dest_image" name="dest_image" accept="image/png,image/jpeg" required><br><br>
+        <label for="source_image">Source Image (the face to use):</label>
+        <input type="file" id="source_image" name="source_image" accept="image/png,image/jpeg" required>
+        <label for="source_face_idx">Source Face Index (1 for first face from left):</label>
+        <input type="number" id="source_face_idx" name="source_face_idx" value="1" min="1" required>
+        <label for="dest_image">Destination Image (the face to replace):</label>
+        <input type="file" id="dest_image" name="dest_image" accept="image/png,image/jpeg" required>
+        <label for="dest_face_idx">Destination Face Index (1 for first face from left):</label>
+        <input type="number" id="dest_face_idx" name="dest_face_idx" value="1" min="1" required>
         <button type="submit">Swap Faces</button>
     </form>
     <div id="loader" class="loader"></div>
@@ -77,6 +88,8 @@
             const formData = new FormData();
             formData.append('source_image', document.getElementById('source_image').files[0]);
             formData.append('dest_image', document.getElementById('dest_image').files[0]);
+            formData.append('source_face_idx', document.getElementById('source_face_idx').value);
+            formData.append('dest_face_idx', document.getElementById('dest_face_idx').value);
 
             const resultDiv = document.getElementById('result');
             const errorDiv = document.getElementById('error');
