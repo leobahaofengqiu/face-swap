@@ -20,7 +20,7 @@ import asyncio
 
 # Configure logging
 logging.basicConfig(
-    level=logging.DEBUG,
+    level logging.DEBUG,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
@@ -30,7 +30,7 @@ app = FastAPI(title="High-Quality Face Swap API", version="2.3.0")
 # CORS configuration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
@@ -85,8 +85,12 @@ def allowed_file(filename: str) -> bool:
 def validate_image(file_path: str) -> bool:
     try:
         with Image.open(file_path) as img:
-            img.verify()
-        return file_path.lower().endswith(('.png', '.jpg', '.jpeg', '.webp'))
+            img.verify()  # Verify image integrity
+            img = Image.open(file_path)  # Reopen to check format
+            if img.format.lower() not in CONFIG["ALLOWED_EXTENSIONS"]:
+                logger.error(f"Image format {img.format} not in allowed extensions")
+                return False
+        return True
     except Exception as e:
         logger.error(f"Image validation failed for {file_path}: {str(e)}")
         return False
@@ -376,6 +380,7 @@ async def shopify_face_swap(
     progress_tracker[task_id] = "Starting"
     logger.info(f"Starting Shopify face swap task: {task_id}")
 
+    temp_file_path = None
     try:
         if not user_image.filename:
             logger.error("No user image provided")
@@ -405,6 +410,11 @@ async def shopify_face_swap(
                 logger.error(f"Failed to download product image: HTTP {response.status_code}")
                 raise HTTPException(400, detail=f"Failed to download product image: HTTP {response.status_code}")
             product_content = response.content
+            content_type = response.headers.get("content-type", "")
+            logger.info(f"Product image content-type: {content_type}")
+            if not content_type.startswith("image/"):
+                logger.error(f"Product image is not an image: Content-Type {content_type}")
+                raise HTTPException(400, detail=f"Product image is not an image: Content-Type {content_type}")
         except requests.RequestException as e:
             logger.error(f"Product image download failed: {str(e)}")
             raise HTTPException(400, detail=f"Failed to download product image: {str(e)}")
@@ -420,9 +430,8 @@ async def shopify_face_swap(
             temp_file.write(product_content)
             temp_file_path = temp_file.name
         if not validate_image(temp_file_path):
-            os.unlink(temp_file_path)
             logger.error(f"Invalid product image format: {product_image_url}")
-            raise HTTPException(400, detail="Invalid product image format. Only PNG, JPG, JPEG, WEBP allowed")
+            raise HTTPException(400, detail=f"Invalid product image format: {product_image_url}")
 
         progress_tracker[task_id] = "Preprocessing images for high quality"
         user_content = high_quality_preprocess(user_content)
@@ -433,7 +442,6 @@ async def shopify_face_swap(
             result_url = f"/{cache[cache_key]}"
             logger.info(f"Cache hit: {result_url}")
             background_tasks.add_task(cleanup_output_folder)
-            os.unlink(temp_file_path)
             return JSONResponse({
                 "success": True,
                 "data": {"result_image": result_url, "task_id": task_id},
@@ -457,7 +465,6 @@ async def shopify_face_swap(
             logger.info(f"Cached high-quality result: {result}")
 
         background_tasks.add_task(cleanup_output_folder)
-        os.unlink(temp_file_path)
 
         return JSONResponse({
             "success": True,
@@ -468,8 +475,11 @@ async def shopify_face_swap(
     except HTTPException as e:
         logger.error(f"Shopify face swap error: {str(e)}")
         progress_tracker[task_id] = f"Error: {str(e)}"
-        if 'temp_file_path' in locals():
-            os.unlink(temp_file_path)
+        if temp_file_path and os.path.exists(temp_file_path):
+            try:
+                os.unlink(temp_file_path)
+            except FileNotFoundError:
+                logger.warning(f"Temporary file {temp_file_path} already deleted")
         return JSONResponse(
             status_code=e.status_code,
             content={"success": False, "data": None, "error": str(e.detail)},
@@ -478,8 +488,11 @@ async def shopify_face_swap(
     except Exception as e:
         logger.error(f"Shopify face swap error: {str(e)}")
         progress_tracker[task_id] = f"Error: {str(e)}"
-        if 'temp_file_path' in locals():
-            os.unlink(temp_file_path)
+        if temp_file_path and os.path.exists(temp_file_path):
+            try:
+                os.unlink(temp_file_path)
+            except FileNotFoundError:
+                logger.warning(f"Temporary file {temp_file_path} already deleted")
         return JSONResponse(
             status_code=500,
             content={"success": False, "data": None, "error": str(e)},
