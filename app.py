@@ -363,7 +363,7 @@ async def get_progress(task_id: str):
 @app.post("/shopify-face-swap", description="Upload user face and product image URL for Shopify preview")
 async def shopify_face_swap(
     user_image: UploadFile = File(...),
-    product_image_url: str = "",
+    product_image_url: str = Form(...),
     background_tasks: BackgroundTasks = None
 ):
     start_time = time.time()
