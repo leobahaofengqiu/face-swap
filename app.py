@@ -227,7 +227,7 @@ async def face_swap(
         result = client.predict(
             sourceImage=handle_file(source_image),
             sourceFaceIndex=source_face_idx,
-            destinationImage=Lee_file(dest_image),
+            destinationImage=handle_file(dest_image),
             destinationFaceIndex=dest_face_idx,
             api_name="/predict"
         )
@@ -338,6 +338,9 @@ async def swap_faces(
         if cache_key in cache:
             result_url = f"/{cache[cache_key]}"
             logger.info(f"Cache hit: {result_url}")
+            if not os.path.exists(result_url.lstrip("/")):
+                logger.error(f"Cached file {result_url} does not exist")
+                raise HTTPException(500, detail=f"Cached file {result_url} does not exist")
             background_tasks.add_task(cleanup_output_folder)
             return JSONResponse({
                 "success": True,
