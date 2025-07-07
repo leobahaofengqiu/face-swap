@@ -7,7 +7,7 @@ import logging
 import requests
 from pathlib import Path
 from typing import Optional, Dict
-from fastapi import FastAPI, File, UploadFile, Request, BackgroundTasks, HTTPException
+from fastapi import FastAPI, File, UploadFile, Request, BackgroundTasks, HTTPException, Form
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
