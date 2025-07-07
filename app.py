@@ -20,7 +20,7 @@ import asyncio
 
 # Configure logging
 logging.basicConfig(
-    level=logging.DEBUG,  # Fixed syntax: added '='
+    level=logging.DEBUG,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
@@ -51,13 +51,24 @@ CONFIG = {
     "PRESERVE_RESOLUTION": True
 }
 
-# Create directories
+# Create directories and verify permissions
 for folder in [CONFIG["STATIC_DIR"], CONFIG["UPLOAD_FOLDER"], CONFIG["OUTPUT_FOLDER"]]:
     os.makedirs(folder, exist_ok=True)
+    try:
+        # Test write permissions
+        test_file = os.path.join(folder, f"test_{uuid.uuid4().hex}.txt")
+        with open(test_file, "w") as f:
+            f.write("test")
+        os.unlink(test_file)
+        logger.info(f"Write permissions verified for {folder}")
+    except Exception as e:
+        logger.error(f"Failed to verify write permissions for {folder}: {str(e)}")
+        raise Exception(f"Cannot write to {folder}: {str(e)}")
 
 # Custom StaticFiles
 class CORSStaticFiles(StaticFiles):
     async def get_response(self, path: str, scope):
+        logger.debug(f"Serving static file: {path}")
         response = await super().get_response(path, scope)
         response.headers.update({
             "Access-Control-Allow-Origin": "*",
@@ -90,6 +101,7 @@ def validate_image(file_path: str) -> bool:
             if img.format.lower() not in CONFIG["ALLOWED_EXTENSIONS"]:
                 logger.error(f"Image format {img.format} not in allowed extensions")
                 return False
+        logger.debug(f"Image validated successfully: {file_path}")
         return True
     except Exception as e:
         logger.error(f"Image validation failed for {file_path}: {str(e)}")
@@ -145,6 +157,7 @@ def high_quality_preprocess(content: bytes) -> bytes:
         
         os.unlink(temp_file_path)
         os.unlink(output_file.name)
+        logger.debug(f"Image preprocessing completed for {temp_file_path}")
         return result
     except Exception as e:
         logger.error(f"Image preprocessing failed: {str(e)}")
@@ -173,8 +186,10 @@ def high_quality_enhance(image_path: str, enhancements: Dict[str, float] = None)
                 quality=CONFIG["QUALITY"],
                 progressive=True
             )
+        logger.debug(f"Image enhancements applied to {image_path}")
     except Exception as e:
-        logger.error(f"Image enhancement failed: {str(e)}")
+        logger.error(f"Image enhancement failed for {image_path}: {str(e)}")
+        raise
 
 async def cleanup_output_folder():
     try:
@@ -200,6 +215,7 @@ async def face_swap(
             raise ValueError("Invalid input files")
 
         progress_tracker[task_id] = "Initializing face swap"
+        logger.debug(f"Initializing Gradio client for task {task_id}")
         try:
             client = Client("Dentro/face-swap")
         except Exception as e:
@@ -207,10 +223,11 @@ async def face_swap(
             raise HTTPException(500, detail=f"Gradio client initialization failed: {str(e)}")
 
         progress_tracker[task_id] = "Processing high-quality face swap"
+        logger.debug(f"Running face swap with source: {source_image}, dest: {dest_image}")
         result = client.predict(
             sourceImage=handle_file(source_image),
             sourceFaceIndex=source_face_idx,
-            destinationImage=handle_file(dest_image),
+            destinationImage=Lee_file(dest_image),
             destinationFaceIndex=dest_face_idx,
             api_name="/predict"
         )
@@ -230,12 +247,14 @@ async def face_swap(
                         logger.info(f"Successful fallback with source index {idx}")
                         break
             if not result or not os.path.exists(result):
+                logger.error(f"All face swap attempts failed for task {task_id}")
                 raise ValueError("All face swap attempts failed")
 
         unique_filename = f"face_swap_{uuid.uuid4().hex}.png"
         output_path = os.path.join(CONFIG["OUTPUT_FOLDER"], unique_filename)
         
         progress_tracker[task_id] = "Applying high-quality enhancements"
+        logger.debug(f"Saving face swap result to {output_path}")
         with Image.open(result) as img:
             img = img.convert("RGB")
             img.save(
@@ -247,6 +266,11 @@ async def face_swap(
             )
         high_quality_enhance(output_path)
         
+        if not os.path.exists(output_path):
+            logger.error(f"Output file {output_path} was not created")
+            raise ValueError(f"Output file {output_path} was not created")
+
+        logger.debug(f"Face swap completed, output saved to {output_path}")
         progress_tracker[task_id] = "Completed"
         return output_path
     except Exception as e:
@@ -441,6 +465,9 @@ async def shopify_face_swap(
         if cache_key in cache:
             result_url = f"/{cache[cache_key]}"
             logger.info(f"Cache hit: {result_url}")
+            if not os.path.exists(result_url.lstrip("/")):
+                logger.error(f"Cached file {result_url} does not exist")
+                raise HTTPException(500, detail=f"Cached file {result_url} does not exist")
             background_tasks.add_task(cleanup_output_folder)
             return JSONResponse({
                 "success": True,
@@ -464,13 +491,13 @@ async def shopify_face_swap(
             cache[cache_key] = result
             logger.info(f"Cached high-quality result: {result}")
 
-        background_tasks.add_task(cleanup_output_folder)
+            background_tasks.add_task(cleanup_output_folder)
 
-        return JSONResponse({
-            "success": True,
-            "data": {"result_image": f"/{result}", "task_id": task_id},
-            "error": None
-        }, headers={"X-Process-Time": f"{time.time() - start_time:.2f}"})
+            return JSONResponse({
+                "success": True,
+                "data": {"result_image": f"/{result}", "task_id": task_id},
+                "error": None
+            }, headers={"X-Process-Time": f"{time.time() - start_time:.2f}"})
 
     except HTTPException as e:
         logger.error(f"Shopify face swap error: {str(e)}")
