@@ -19,7 +19,7 @@ from gradio_client import Client, handle_file
 from retry import retry
 import asyncio
 
-# Configure logging with detailed output
+# Configure logging
 logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -38,7 +38,7 @@ app.add_middleware(
     expose_headers=["X-Process-Time"],
 )
 
-# Configuration optimized for high quality
+# Configuration
 CONFIG = {
     "UPLOAD_FOLDER": os.getenv("UPLOAD_FOLDER", "static/uploads"),
     "OUTPUT_FOLDER": os.getenv("OUTPUT_FOLDER", "static/output"),
@@ -48,15 +48,15 @@ CONFIG = {
     "CACHE_TTL": int(os.getenv("CACHE_TTL", 7200)),  # 2 hours
     "MAX_CACHE_SIZE": int(os.getenv("MAX_CACHE_SIZE", 100)),
     "CLEANUP_INTERVAL": int(os.getenv("CLEANUP_INTERVAL", 3600)),
-    "QUALITY": int(os.getenv("QUALITY", 98)),  # Increased quality
-    "PRESERVE_RESOLUTION": True  # Flag to preserve original resolution
+    "QUALITY": int(os.getenv("QUALITY", 98)),
+    "PRESERVE_RESOLUTION": True
 }
 
 # Create directories
 for folder in [CONFIG["STATIC_DIR"], CONFIG["UPLOAD_FOLDER"], CONFIG["OUTPUT_FOLDER"]]:
     os.makedirs(folder, exist_ok=True)
 
-# Custom StaticFiles with quality headers
+# Custom StaticFiles
 class CORSStaticFiles(StaticFiles):
     async def get_response(self, path: str, scope):
         response = await super().get_response(path, scope)
@@ -89,7 +89,7 @@ def validate_image(file_path: str) -> bool:
             img.verify()
         return file_path.lower().endswith(('.png', '.jpg', '.jpeg', '.webp'))
     except Exception as e:
-        logger.error(f"Image validation failed: {str(e)}")
+        logger.error(f"Image validation failed for {file_path}: {str(e)}")
         return False
 
 def get_file_hash(file_content: bytes) -> str:
@@ -104,31 +104,28 @@ def get_image_extension(content: bytes) -> str:
             ext = img.format.lower()
         os.unlink(temp_file_path)
         return ext
-    except Exception:
-        return "jpg"  # Fallback to JPG
+    except Exception as e:
+        logger.error(f"Failed to get image extension: {str(e)}")
+        return "jpg"
 
 def high_quality_preprocess(content: bytes) -> bytes:
-    """Preprocess images with focus on preserving clarity."""
     try:
         with tempfile.NamedTemporaryFile(suffix=".tmp", delete=False) as temp_file:
             temp_file.write(content)
             temp_file_path = temp_file.name
         
         with Image.open(temp_file_path) as img:
-            # Convert to RGB
             if img.mode != 'RGB':
                 img = img.convert('RGB')
             
-            # Preserve original resolution if configured
             if CONFIG["PRESERVE_RESOLUTION"]:
-                img = img.copy()  # Avoid resizing
+                img = img.copy()
             else:
                 original_size = img.size
                 img.thumbnail((1920, 1920), Image.Resampling.LANCZOS)
                 if img.size != original_size:
                     img = img.resize(original_size, Image.Resampling.LANCZOS)
             
-            # Minimal enhancements to preserve details
             img = ImageEnhance.Color(img).enhance(1.05)
             img = ImageEnhance.Contrast(img).enhance(1.02)
             
@@ -151,28 +148,21 @@ def high_quality_preprocess(content: bytes) -> bytes:
         return content
 
 def high_quality_enhance(image_path: str, enhancements: Dict[str, float] = None) -> None:
-    """Apply high-quality image enhancements with a focus on natural clarity and HD output."""
     try:
         enhancements = enhancements or {
-            "sharpness": 1.15,   # Slightly sharpened for clarity without artifacts
-            "contrast": 1.02,    # Soft contrast to avoid harsh tones
-            "brightness": 1.03,  # Slightly brighter
-            "color": 1.05        # Mild color boost
+            "sharpness": 1.15,
+            "contrast": 1.02,
+            "brightness": 1.03,
+            "color": 1.05
         }
 
         with Image.open(image_path) as img:
             img = img.convert("RGB")
-
-            # Apply subtle, natural-looking enhancements
             img = ImageEnhance.Sharpness(img).enhance(enhancements["sharpness"])
             img = ImageEnhance.Contrast(img).enhance(enhancements["contrast"])
             img = ImageEnhance.Brightness(img).enhance(enhancements["brightness"])
             img = ImageEnhance.Color(img).enhance(enhancements["color"])
-
-            # Optional: Apply a light unsharp mask for mild crispness
             img = img.filter(ImageFilter.UnsharpMask(radius=1.0, percent=100, threshold=3))
-
-            # Save as HD (PNG with max quality)
             img.save(
                 image_path,
                 "PNG",
@@ -220,7 +210,6 @@ async def face_swap(
 
         if not result or not os.path.exists(result):
             logger.warning(f"Initial face swap attempt failed with indices {source_face_idx}, {dest_face_idx}")
-            # Fallback with different face indices
             for idx in [0, 2]:
                 if source_face_idx != idx:
                     result = client.predict(
@@ -279,31 +268,29 @@ async def swap_faces(
     logger.info(f"Starting high-quality face swap task: {task_id}")
 
     try:
-        # Validate inputs
         if not (source_image.filename and dest_image.filename):
+            logger.error("No file selected")
             raise HTTPException(400, detail="No file selected")
         
         if not (allowed_file(source_image.filename) and allowed_file(dest_image.filename)):
+            logger.error(f"Invalid file format: {source_image.filename}, {dest_image.filename}")
             raise HTTPException(400, detail="Invalid file format. Only PNG, JPG, JPEG, WEBP allowed")
 
-        # Read and validate file sizes
         source_content = await source_image.read()
         dest_content = await dest_image.read()
         if len(source_content) > CONFIG["MAX_FILE_SIZE"] or len(dest_content) > CONFIG["MAX_FILE_SIZE"]:
+            logger.error(f"File size exceeds limit: {len(source_content)} or {len(dest_content)}")
             raise HTTPException(
                 400,
                 detail=f"File size exceeds {CONFIG['MAX_FILE_SIZE'] / (1024 * 1024)}MB"
             )
 
-        # High-quality preprocessing
         progress_tracker[task_id] = "Preprocessing images for high quality"
         source_content = high_quality_preprocess(source_content)
         dest_content = high_quality_preprocess(dest_content)
 
-        # Generate cache key
         cache_key = f"{get_file_hash(source_content)}:{get_file_hash(dest_content)}:{source_face_idx}:{dest_face_idx}"
 
-        # Check cache
         if cache_key in cache:
             result_url = f"/{cache[cache_key]}"
             logger.info(f"Cache hit: {result_url}")
@@ -314,7 +301,6 @@ async def swap_faces(
                 "error": None
             }, headers={"X-Process-Time": f"{time.time() - start_time:.2f}"})
 
-        # Save temporary files
         with tempfile.TemporaryDirectory() as temp_dir:
             source_filename = f"source_{uuid.uuid4().hex}.{source_image.filename.rsplit('.', 1)[1]}"
             dest_filename = f"dest_{uuid.uuid4().hex}.{dest_image.filename.rsplit('.', 1)[1]}"
@@ -326,12 +312,10 @@ async def swap_faces(
             with open(dest_path, "wb") as f:
                 f.write(dest_content)
 
-            # Perform face swap
             result = await face_swap(source_path, dest_path, source_face_idx, dest_face_idx, task_id)
             cache[cache_key] = result
             logger.info(f"Cached high-quality result: {result}")
 
-            # Schedule cleanup
             background_tasks.add_task(cleanup_output_folder)
 
             return JSONResponse({
@@ -374,29 +358,41 @@ async def shopify_face_swap(
     try:
         # Validate inputs
         if not user_image.filename:
+            logger.error("No user image provided")
             raise HTTPException(400, detail="User image is required")
         if not product_image_url:
+            logger.error("No product image URL provided")
             raise HTTPException(400, detail="Product image URL is required")
         if not product_image_url.startswith(('http://', 'https://')):
+            logger.error(f"Invalid product image URL: {product_image_url}")
             raise HTTPException(400, detail="Invalid product image URL: Must start with http:// or https://")
 
         # Read user image
         user_content = await user_image.read()
         if len(user_content) > CONFIG["MAX_FILE_SIZE"]:
+            logger.error(f"User image size {len(user_content)} exceeds {CONFIG['MAX_FILE_SIZE']}")
             raise HTTPException(
                 400,
                 detail=f"User image size exceeds {CONFIG['MAX_FILE_SIZE'] / (1024 * 1024)}MB"
             )
         if not allowed_file(user_image.filename):
+            logger.error(f"Invalid user image format: {user_image.filename}")
             raise HTTPException(400, detail="Invalid user image format. Only PNG, JPG, JPEG, WEBP allowed")
 
         # Download product image
         progress_tracker[task_id] = "Downloading product image"
-        response = requests.get(product_image_url, timeout=10)
-        if response.status_code != 200:
-            raise HTTPException(400, detail="Failed to download product image from URL")
-        product_content = response.content
+        try:
+            response = requests.get(product_image_url, timeout=10)
+            if response.status_code != 200:
+                logger.error(f"Failed to download product image: HTTP {response.status_code}")
+                raise HTTPException(400, detail=f"Failed to download product image: HTTP {response.status_code}")
+            product_content = response.content
+        except requests.RequestException as e:
+            logger.error(f"Product image download failed: {str(e)}")
+            raise HTTPException(400, detail=f"Failed to download product image: {str(e)}")
+
         if len(product_content) > CONFIG["MAX_FILE_SIZE"]:
+            logger.error(f"Product image size {len(product_content)} exceeds {CONFIG['MAX_FILE_SIZE']}")
             raise HTTPException(
                 400,
                 detail=f"Product image size exceeds {CONFIG['MAX_FILE_SIZE'] / (1024 * 1024)}MB"
@@ -408,6 +404,7 @@ async def shopify_face_swap(
             temp_file_path = temp_file.name
         if not validate_image(temp_file_path):
             os.unlink(temp_file_path)
+            logger.error(f"Invalid product image format: {product_image_url}")
             raise HTTPException(400, detail="Invalid product image format. Only PNG, JPG, JPEG, WEBP allowed")
 
         # High-quality preprocessing
@@ -459,6 +456,8 @@ async def shopify_face_swap(
     except HTTPException as e:
         logger.error(f"Shopify face swap error: {str(e)}")
         progress_tracker[task_id] = f"Error: {str(e)}"
+        if 'temp_file_path' in locals():
+            os.unlink(temp_file_path)
         return JSONResponse(
             status_code=e.status_code,
             content={"success": False, "data": None, "error": str(e.detail)}
