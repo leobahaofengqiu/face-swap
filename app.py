@@ -13,7 +13,6 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image, ImageEnhance, ImageFilter
-import numpy as np
 from cachetools import TTLCache
 from gradio_client import Client, handle_file
 from retry import retry
@@ -31,7 +30,7 @@ app = FastAPI(title="High-Quality Face Swap API", version="2.3.0")
 # CORS configuration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # Allow all origins
     allow_credentials=True,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
@@ -197,8 +196,12 @@ async def face_swap(
             raise ValueError("Invalid input files")
 
         progress_tracker[task_id] = "Initializing face swap"
-        client = Client("Dentro/face-swap")
-        
+        try:
+            client = Client("Dentro/face-swap")
+        except Exception as e:
+            logger.error(f"Failed to initialize Gradio client: {str(e)}")
+            raise HTTPException(500, detail=f"Gradio client initialization failed: {str(e)}")
+
         progress_tracker[task_id] = "Processing high-quality face swap"
         result = client.predict(
             sourceImage=handle_file(source_image),
@@ -246,6 +249,19 @@ async def face_swap(
         progress_tracker[task_id] = f"Error: {str(e)}"
         logger.error(f"Face swap failed: {str(e)} with files {source_image}, {dest_image}")
         raise
+
+@app.options("/shopify-face-swap", description="Handle CORS preflight requests")
+async def cors_preflight():
+    return JSONResponse(
+        status_code=200,
+        content={},
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+            "Access-Control-Max-Age": "86400",
+        }
+    )
 
 @app.get("/", description="Render the index page for the face-swap UI")
 async def index(request: Request):
@@ -329,20 +345,25 @@ async def swap_faces(
         progress_tracker[task_id] = f"Error: {str(e)}"
         return JSONResponse(
             status_code=e.status_code,
-            content={"success": False, "data": None, "error": str(e.detail)}
+            content={"success": False, "data": None, "error": str(e.detail)},
+            headers={"Access-Control-Allow-Origin": "*"}
         )
     except Exception as e:
         logger.error(f"Face swap error: {str(e)}")
         progress_tracker[task_id] = f"Error: {str(e)}"
         return JSONResponse(
             status_code=500,
-            content={"success": False, "data": None, "error": str(e)}
+            content={"success": False, "data": None, "error": str(e)},
+            headers={"Access-Control-Allow-Origin": "*"}
         )
 
 @app.get("/progress/{task_id}", description="Check progress of face swap task")
 async def get_progress(task_id: str):
     status = progress_tracker.get(task_id, "Unknown task")
-    return {"task_id": task_id, "status": status}
+    return JSONResponse(
+        content={"task_id": task_id, "status": status},
+        headers={"Access-Control-Allow-Origin": "*"}
+    )
 
 @app.post("/shopify-face-swap", description="Upload user face and product image URL for Shopify preview")
 async def shopify_face_swap(
@@ -356,7 +377,6 @@ async def shopify_face_swap(
     logger.info(f"Starting Shopify face swap task: {task_id}")
 
     try:
-        # Validate inputs
         if not user_image.filename:
             logger.error("No user image provided")
             raise HTTPException(400, detail="User image is required")
@@ -367,7 +387,6 @@ async def shopify_face_swap(
             logger.error(f"Invalid product image URL: {product_image_url}")
             raise HTTPException(400, detail="Invalid product image URL: Must start with http:// or https://")
 
-        # Read user image
         user_content = await user_image.read()
         if len(user_content) > CONFIG["MAX_FILE_SIZE"]:
             logger.error(f"User image size {len(user_content)} exceeds {CONFIG['MAX_FILE_SIZE']}")
@@ -379,7 +398,6 @@ async def shopify_face_swap(
             logger.error(f"Invalid user image format: {user_image.filename}")
             raise HTTPException(400, detail="Invalid user image format. Only PNG, JPG, JPEG, WEBP allowed")
 
-        # Download product image
         progress_tracker[task_id] = "Downloading product image"
         try:
             response = requests.get(product_image_url, timeout=10)
@@ -398,7 +416,6 @@ async def shopify_face_swap(
                 detail=f"Product image size exceeds {CONFIG['MAX_FILE_SIZE'] / (1024 * 1024)}MB"
             )
 
-        # Validate product image
         with tempfile.NamedTemporaryFile(suffix=".tmp", delete=False) as temp_file:
             temp_file.write(product_content)
             temp_file_path = temp_file.name
@@ -407,12 +424,10 @@ async def shopify_face_swap(
             logger.error(f"Invalid product image format: {product_image_url}")
             raise HTTPException(400, detail="Invalid product image format. Only PNG, JPG, JPEG, WEBP allowed")
 
-        # High-quality preprocessing
         progress_tracker[task_id] = "Preprocessing images for high quality"
         user_content = high_quality_preprocess(user_content)
         product_content = high_quality_preprocess(product_content)
 
-        # Generate cache key
         cache_key = f"{get_file_hash(user_content)}:{get_file_hash(product_content)}:1:1"
         if cache_key in cache:
             result_url = f"/{cache[cache_key]}"
@@ -425,7 +440,6 @@ async def shopify_face_swap(
                 "error": None
             }, headers={"X-Process-Time": f"{time.time() - start_time:.2f}"})
 
-        # Save temporary files
         with tempfile.TemporaryDirectory() as temp_dir:
             user_filename = f"user_{uuid.uuid4().hex}.{user_image.filename.rsplit('.', 1)[1]}"
             product_ext = get_image_extension(product_content)
@@ -438,12 +452,10 @@ async def shopify_face_swap(
             with open(product_path, "wb") as f:
                 f.write(product_content)
 
-            # Perform face swap
             result = await face_swap(user_path, product_path, 1, 1, task_id)
             cache[cache_key] = result
             logger.info(f"Cached high-quality result: {result}")
 
-        # Schedule cleanup
         background_tasks.add_task(cleanup_output_folder)
         os.unlink(temp_file_path)
 
@@ -460,7 +472,8 @@ async def shopify_face_swap(
             os.unlink(temp_file_path)
         return JSONResponse(
             status_code=e.status_code,
-            content={"success": False, "data": None, "error": str(e.detail)}
+            content={"success": False, "data": None, "error": str(e.detail)},
+            headers={"Access-Control-Allow-Origin": "*"}
         )
     except Exception as e:
         logger.error(f"Shopify face swap error: {str(e)}")
@@ -469,5 +482,6 @@ async def shopify_face_swap(
             os.unlink(temp_file_path)
         return JSONResponse(
             status_code=500,
-            content={"success": False, "data": None, "error": str(e)}
+            content={"success": False, "data": None, "error": str(e)},
+            headers={"Access-Control-Allow-Origin": "*"}
         )
