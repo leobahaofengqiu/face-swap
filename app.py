@@ -340,10 +340,20 @@ async def swap_faces(
                 "error": None
             }, headers={"X-Process-Time": f"{time.time() - start_time:.2f}"})
 
+    except HTTPException as e:
+        logger.error(f"Face swap error: {str(e)}")
+        progress_tracker[task_id] = f"Error: {str(e)}"
+        return JSONResponse(
+            status_code=e.status_code,
+            content={"success": False, "data": None, "error": str(e.detail)}
+        )
     except Exception as e:
         logger.error(f"Face swap error: {str(e)}")
         progress_tracker[task_id] = f"Error: {str(e)}"
-        raise HTTPException(500, detail=str(e))
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "data": None, "error": str(e)}
+        )
 
 @app.get("/progress/{task_id}", description="Check progress of face swap task")
 async def get_progress(task_id: str):
@@ -367,6 +377,8 @@ async def shopify_face_swap(
             raise HTTPException(400, detail="User image is required")
         if not product_image_url:
             raise HTTPException(400, detail="Product image URL is required")
+        if not product_image_url.startswith(('http://', 'https://')):
+            raise HTTPException(400, detail="Invalid product image URL: Must start with http:// or https://")
 
         # Read user image
         user_content = await user_image.read()
@@ -444,9 +456,19 @@ async def shopify_face_swap(
             "error": None
         }, headers={"X-Process-Time": f"{time.time() - start_time:.2f}"})
 
+    except HTTPException as e:
+        logger.error(f"Shopify face swap error: {str(e)}")
+        progress_tracker[task_id] = f"Error: {str(e)}"
+        return JSONResponse(
+            status_code=e.status_code,
+            content={"success": False, "data": None, "error": str(e.detail)}
+        )
     except Exception as e:
         logger.error(f"Shopify face swap error: {str(e)}")
         progress_tracker[task_id] = f"Error: {str(e)}"
         if 'temp_file_path' in locals():
             os.unlink(temp_file_path)
-        raise HTTPException(500, detail=str(e))
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "data": None, "error": str(e)}
+        )
