@@ -43,7 +43,7 @@ CONFIG = {
     "UPLOAD_FOLDER": os.getenv("UPLOAD_FOLDER", "static/uploads"),
     "OUTPUT_FOLDER": os.getenv("OUTPUT_FOLDER", "static/output"),
     "STATIC_DIR": "static",
-    "ALLOWED_EXTENSIONS": {'png', 'jpg', 'jpeg'},
+    "ALLOWED_EXTENSIONS": {'png', 'jpg', 'jpeg', 'webp'},
     "MAX_FILE_SIZE": int(os.getenv("MAX_FILE_SIZE", 30 * 1024 * 1024)),  # 30MB
     "CACHE_TTL": int(os.getenv("CACHE_TTL", 7200)),  # 2 hours
     "MAX_CACHE_SIZE": int(os.getenv("MAX_CACHE_SIZE", 100)),
@@ -87,7 +87,7 @@ def validate_image(file_path: str) -> bool:
     try:
         with Image.open(file_path) as img:
             img.verify()
-        return file_path.lower().endswith(('.png', '.jpg', '.jpeg'))
+        return file_path.lower().endswith(('.png', '.jpg', '.jpeg', '.webp'))
     except Exception as e:
         logger.error(f"Image validation failed: {str(e)}")
         return False
@@ -110,7 +110,7 @@ def get_image_extension(content: bytes) -> str:
 def high_quality_preprocess(content: bytes) -> bytes:
     """Preprocess images with focus on preserving clarity."""
     try:
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as temp_file:
+        with tempfile.NamedTemporaryFile(suffix=".tmp", delete=False) as temp_file:
             temp_file.write(content)
             temp_file_path = temp_file.name
         
@@ -284,7 +284,7 @@ async def swap_faces(
             raise HTTPException(400, detail="No file selected")
         
         if not (allowed_file(source_image.filename) and allowed_file(dest_image.filename)):
-            raise HTTPException(400, detail="Invalid file format. Only PNG, JPG, JPEG allowed")
+            raise HTTPException(400, detail="Invalid file format. Only PNG, JPG, JPEG, WEBP allowed")
 
         # Read and validate file sizes
         source_content = await source_image.read()
@@ -376,7 +376,7 @@ async def shopify_face_swap(
                 detail=f"User image size exceeds {CONFIG['MAX_FILE_SIZE'] / (1024 * 1024)}MB"
             )
         if not allowed_file(user_image.filename):
-            raise HTTPException(400, detail="Invalid user image format. Only PNG, JPG, JPEG allowed")
+            raise HTTPException(400, detail="Invalid user image format. Only PNG, JPG, JPEG, WEBP allowed")
 
         # Download product image
         progress_tracker[task_id] = "Downloading product image"
@@ -396,8 +396,8 @@ async def shopify_face_swap(
             temp_file_path = temp_file.name
         if not validate_image(temp_file_path):
             os.unlink(temp_file_path)
-            raise HTTPException(400, detail="Invalid product image format")
-        
+            raise HTTPException(400, detail="Invalid product image format. Only PNG, JPG, JPEG, WEBP allowed")
+
         # High-quality preprocessing
         progress_tracker[task_id] = "Preprocessing images for high quality"
         user_content = high_quality_preprocess(user_content)
