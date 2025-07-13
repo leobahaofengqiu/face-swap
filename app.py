@@ -117,12 +117,9 @@ def score_image_prominence(image_path: str) -> float:
         with Image.open(image_path) as img:
             img = img.convert("RGB")
             width, height = img.size
-            # Calculate pixel variance as a proxy for clarity (higher variance = more detail)
-            pixels = np.array(img)
-            variance = float(np.var(pixels))
-            # Combine size and variance for prominence score
-            score = (width * height) * (1 + variance / 1000)  # Adjust variance weight
-            logger.debug(f"Prominence score for {image_path}: {score} (size: {width}x{height}, variance: {variance})")
+            # Use image size (width * height) as prominence score
+            score = width * height
+            logger.debug(f"Prominence score for {image_path}: {score} (size: {width}x{height})")
             return score
     except Exception as e:
         logger.error(f"Failed to score prominence for {image_path}: {str(e)}")
@@ -246,7 +243,7 @@ async def face_swap(
         progress_tracker[task_id] = "Processing high-quality face swap"
         logger.debug(f"Running face swap with source: {source_image}, dest: {dest_image}")
 
-        # Try all destination face indices to find the most prominent face (1-based)
+        # Try all destination face indices to find the largest face (1-based)
         max_attempts = 5  # Maximum number of face indices to try
         results = []  # Store (output_path, prominence_score, dest_idx) tuples
         for idx in range(1, max_attempts + 1):
@@ -278,8 +275,8 @@ async def face_swap(
                         )
                     score = score_image_prominence(temp_output_path)
                     results.append((temp_output_path, score, idx))
-                    logger.debug(f"Face swap with destination index {idx} succeeded, score: {score}")
-                    progress_tracker[task_id] = f"Face swap with destination index {idx} succeeded, score: {score}"
+                    logger.debug(f"Face swap with destination index {idx} succeeded, size score: {score}")
+                    progress_tracker[task_id] = f"Face swap with destination index {idx} succeeded, size score: {score}"
                 else:
                     logger.warning(f"Face swap attempt with destination index {idx} failed or produced invalid result")
                     progress_tracker[task_id] = f"Face swap attempt with destination index {idx} failed"
@@ -292,14 +289,14 @@ async def face_swap(
                     os.unlink(temp_output_path)
                 continue
 
-        # Select the result with the highest prominence score
+        # Select the result with the largest size score
         if results:
             best_result_path, best_score, best_idx = max(results, key=lambda x: x[1])
             unique_filename = f"face_swap_{uuid.uuid4().hex}.png"
             output_path = os.path.join(CONFIG["OUTPUT_FOLDER"], unique_filename)
             
             progress_tracker[task_id] = "Applying high-quality enhancements"
-            logger.debug(f"Saving best face swap result (index {best_idx}, score {best_score}) to {output_path}")
+            logger.debug(f"Saving best face swap result (index {best_idx}, size score {best_score}) to {output_path}")
             with Image.open(best_result_path) as img:
                 img = img.convert("RGB")
                 img.save(
@@ -321,7 +318,7 @@ async def face_swap(
                 raise ValueError(f"Output file {output_path} was not created")
 
             logger.debug(f"Face swap completed with destination index {best_idx}, output saved to {output_path}")
-            progress_tracker[task_id] = "Completed"
+            progress_tracker[task_id] = f"Completed with largest face at index {best_idx} (size score: {best_score})"
             return output_path
 
         # If no valid destination results, try alternative source indices (1-based)
@@ -354,8 +351,8 @@ async def face_swap(
                                 )
                             score = score_image_prominence(temp_output_path)
                             results.append((temp_output_path, score, dest_idx))
-                            logger.debug(f"Fallback with source index {src_idx}, destination index {dest_idx} succeeded, score: {score}")
-                            progress_tracker[task_id] = f"Fallback with source index {src_idx}, destination index {dest_idx} succeeded, score: {score}"
+                            logger.debug(f"Fallback with source index {src_idx}, destination index {dest_idx} succeeded, size score: {score}")
+                            progress_tracker[task_id] = f"Fallback with source index {src_idx}, destination index {dest_idx} succeeded, size score: {score}"
                         else:
                             logger.warning(f"Fallback attempt with source index {src_idx} and destination index {dest_idx} failed")
                             progress_tracker[task_id] = f"Fallback attempt with source index {src_idx} and destination index {dest_idx} failed"
@@ -374,7 +371,7 @@ async def face_swap(
                     output_path = os.path.join(CONFIG["OUTPUT_FOLDER"], unique_filename)
                     
                     progress_tracker[task_id] = "Applying high-quality enhancements"
-                    logger.debug(f"Saving best fallback result (source index {src_idx}, destination index {best_idx}, score {best_score}) to {output_path}")
+                    logger.debug(f"Saving best fallback result (source index {src_idx}, destination index {best_idx}, size score {best_score}) to {output_path}")
                     with Image.open(best_result_path) as img:
                         img = img.convert("RGB")
                         img.save(
@@ -396,7 +393,7 @@ async def face_swap(
                         raise ValueError(f"Output file {output_path} was not created")
 
                     logger.debug(f"Face swap completed with source index {src_idx}, destination index {best_idx}")
-                    progress_tracker[task_id] = "Completed"
+                    progress_tracker[task_id] = f"Completed with largest face at index {best_idx} (size score: {best_score})"
                     return output_path
 
         logger.error(f"All face swap attempts failed for task {task_id}")
