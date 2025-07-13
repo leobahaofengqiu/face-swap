@@ -17,7 +17,6 @@ from cachetools import TTLCache
 from gradio_client import Client, handle_file
 from retry import retry
 import asyncio
-import httpx
 
 # Configure logging
 logging.basicConfig(
@@ -51,7 +50,6 @@ CONFIG = {
     "QUALITY": int(os.getenv("QUALITY", 98)),
     "PRESERVE_RESOLUTION": True,
     "MIN_IMAGE_SIZE": 10000,  # Minimum file size in bytes to consider image valid
-    "GRADIO_TIMEOUT": int(os.getenv("GRADIO_TIMEOUT", 30)),  # Increased timeout for Gradio client
 }
 
 # Create directories and verify permissions
@@ -223,10 +221,7 @@ async def face_swap(
         progress_tracker[task_id] = "Initializing face swap"
         logger.debug(f"Initializing Gradio client for task {task_id}")
         try:
-            client = Client(
-                "Dentro/face-swap",
-                httpx_client=httpx.Client(timeout=CONFIG["GRADIO_TIMEOUT"])
-            )
+            client = Client("Dentro/face-swap")
         except Exception as e:
             logger.error(f"Failed to initialize Gradio client: {str(e)}")
             raise HTTPException(500, detail=f"Gradio client initialization failed: {str(e)}")
