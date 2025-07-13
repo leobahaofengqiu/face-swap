@@ -46,16 +46,16 @@ CONFIG = {
     "MAX_FILE_SIZE": int(os.getenv("MAX_FILE_SIZE", 30 * 1024 * 1024)),  # 30MB
     "CACHE_TTL": int(os.getenv("CACHE_TTL", 7200)),  # 2 hours
     "MAX_CACHE_SIZE": int(os.getenv("MAX_CACHE_SIZE", 100)),
-    "CLEANUP_INTERVAL": int(os.getenv("CLEANUP_INTERVAL", 3600)),
+    "CLEANUP_INTERVAL": int(os.getenv("CLEANUP_INTERVAL", 3600)),  # 1 hour
     "QUALITY": int(os.getenv("QUALITY", 98)),
-    "PRESERVE_RESOLUTION": True
+    "PRESERVE_RESOLUTION": True,
+    "MIN_IMAGE_SIZE": 10000  # Minimum file size in bytes to consider image valid
 }
 
 # Create directories and verify permissions
 for folder in [CONFIG["STATIC_DIR"], CONFIG["UPLOAD_FOLDER"], CONFIG["OUTPUT_FOLDER"]]:
     os.makedirs(folder, exist_ok=True)
     try:
-        # Test write permissions
         test_file = os.path.join(folder, f"test_{uuid.uuid4().hex}.txt")
         with open(test_file, "w") as f:
             f.write("test")
@@ -100,6 +100,10 @@ def validate_image(file_path: str) -> bool:
             img = Image.open(file_path)  # Reopen to check format
             if img.format.lower() not in CONFIG["ALLOWED_EXTENSIONS"]:
                 logger.error(f"Image format {img.format} not in allowed extensions")
+                return False
+            # Check for minimum file size to avoid blank or corrupted images
+            if os.path.getsize(file_path) < CONFIG["MIN_IMAGE_SIZE"]:
+                logger.error(f"Image too small or potentially corrupted: {file_path}")
                 return False
         logger.debug(f"Image validated successfully: {file_path}")
         return True
@@ -224,55 +228,88 @@ async def face_swap(
 
         progress_tracker[task_id] = "Processing high-quality face swap"
         logger.debug(f"Running face swap with source: {source_image}, dest: {dest_image}")
-        result = client.predict(
-            sourceImage=handle_file(source_image),
-            sourceFaceIndex=source_face_idx,
-            destinationImage=handle_file(dest_image),
-            destinationFaceIndex=dest_face_idx,
-            api_name="/predict"
-        )
 
-        if not result or not os.path.exists(result):
-            logger.warning(f"Initial face swap attempt failed with indices {source_face_idx}, {dest_face_idx}")
-            for idx in [0, 2]:
-                if source_face_idx != idx:
+        # Try multiple destination face indices to handle multiple faces
+        max_attempts = 5  # Maximum number of face indices to try
+        for idx in range(max_attempts):
+            logger.debug(f"Trying face swap with destination index {idx}")
+            result = client.predict(
+                sourceImage=handle_file(source_image),
+                sourceFaceIndex=source_face_idx,
+                destinationImage=handle_file(dest_image),
+                destinationFaceIndex=idx,
+                api_name="/predict"
+            )
+
+            # Validate output image
+            if result and os.path.exists(result) and validate_image(result):
+                unique_filename = f"face_swap_{uuid.uuid4().hex}.png"
+                output_path = os.path.join(CONFIG["OUTPUT_FOLDER"], unique_filename)
+                
+                progress_tracker[task_id] = "Applying high-quality enhancements"
+                logger.debug(f"Saving face swap result to {output_path}")
+                with Image.open(result) as img:
+                    img = img.convert("RGB")
+                    img.save(
+                        output_path,
+                        "PNG",
+                        quality=CONFIG["QUALITY"],
+                        optimize=True,
+                        progressive=True
+                    )
+                high_quality_enhance(output_path)
+                
+                if not os.path.exists(output_path):
+                    logger.error(f"Output file {output_path} was not created")
+                    raise ValueError(f"Output file {output_path} was not created")
+
+                logger.debug(f"Face swap completed with destination index {idx}, output saved to {output_path}")
+                progress_tracker[task_id] = "Completed"
+                return output_path
+            else:
+                logger.warning(f"Face swap attempt with destination index {idx} failed or produced invalid result")
+
+        # If all attempts fail, try alternative source indices
+        for src_idx in [0, 2]:
+            if src_idx != source_face_idx:
+                for dest_idx in range(max_attempts):
+                    logger.debug(f"Trying fallback with source index {src_idx} and destination index {dest_idx}")
                     result = client.predict(
                         sourceImage=handle_file(source_image),
-                        sourceFaceIndex=idx,
+                        sourceFaceIndex=src_idx,
                         destinationImage=handle_file(dest_image),
-                        destinationFaceIndex=dest_face_idx,
+                        destinationFaceIndex=dest_idx,
                         api_name="/predict"
                     )
-                    if result and os.path.exists(result):
-                        logger.info(f"Successful fallback with source index {idx}")
-                        break
-            if not result or not os.path.exists(result):
-                logger.error(f"All face swap attempts failed for task {task_id}")
-                raise ValueError("All face swap attempts failed")
+                    if result and os.path.exists(result) and validate_image(result):
+                        unique_filename = f"face_swap_{uuid.uuid4().hex}.png"
+                        output_path = os.path.join(CONFIG["OUTPUT_FOLDER"], unique_filename)
+                        
+                        progress_tracker[task_id] = "Applying high-quality enhancements"
+                        logger.debug(f"Saving face swap result to {output_path}")
+                        with Image.open(result) as img:
+                            img = img.convert("RGB")
+                            img.save(
+                                output_path,
+                                "PNG",
+                                quality=CONFIG["QUALITY"],
+                                optimize=True,
+                                progressive=True
+                            )
+                        high_quality_enhance(output_path)
+                        
+                        if not os.path.exists(output_path):
+                            logger.error(f"Output file {output_path} was not created")
+                            raise ValueError(f"Output file {output_path} was not created")
 
-        unique_filename = f"face_swap_{uuid.uuid4().hex}.png"
-        output_path = os.path.join(CONFIG["OUTPUT_FOLDER"], unique_filename)
-        
-        progress_tracker[task_id] = "Applying high-quality enhancements"
-        logger.debug(f"Saving face swap result to {output_path}")
-        with Image.open(result) as img:
-            img = img.convert("RGB")
-            img.save(
-                output_path,
-                "PNG",
-                quality=CONFIG["QUALITY"],
-                optimize=True,
-                progressive=True
-            )
-        high_quality_enhance(output_path)
-        
-        if not os.path.exists(output_path):
-            logger.error(f"Output file {output_path} was not created")
-            raise ValueError(f"Output file {output_path} was not created")
+                        logger.debug(f"Face swap completed with source index {src_idx}, destination index {dest_idx}")
+                        progress_tracker[task_id] = "Completed"
+                        return output_path
+                    else:
+                        logger.warning(f"Fallback attempt with source index {src_idx} and destination index {dest_idx} failed")
 
-        logger.debug(f"Face swap completed, output saved to {output_path}")
-        progress_tracker[task_id] = "Completed"
-        return output_path
+        logger.error(f"All face swap attempts failed for task {task_id}")
+        raise ValueError("All face swap attempts failed")
     except Exception as e:
         progress_tracker[task_id] = f"Error: {str(e)}"
         logger.error(f"Face swap failed: {str(e)} with files {source_image}, {dest_image}")
