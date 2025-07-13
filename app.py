@@ -17,6 +17,7 @@ from cachetools import TTLCache
 from gradio_client import Client, handle_file
 from retry import retry
 import asyncio
+import httpx
 
 # Configure logging
 logging.basicConfig(
@@ -49,7 +50,8 @@ CONFIG = {
     "CLEANUP_INTERVAL": int(os.getenv("CLEANUP_INTERVAL", 3600)),  # 1 hour
     "QUALITY": int(os.getenv("QUALITY", 98)),
     "PRESERVE_RESOLUTION": True,
-    "MIN_IMAGE_SIZE": 10000  # Minimum file size in bytes to consider image valid
+    "MIN_IMAGE_SIZE": 10000,  # Minimum file size in bytes to consider image valid
+    "GRADIO_TIMEOUT": int(os.getenv("GRADIO_TIMEOUT", 30)),  # Increased timeout for Gradio client
 }
 
 # Create directories and verify permissions
@@ -206,7 +208,7 @@ async def cleanup_output_folder():
     except Exception as e:
         logger.error(f"Output folder cleanup failed: {str(e)}")
 
-@retry(tries=5, delay=2, backoff=2, exceptions=(Exception,))
+@retry(tries=3, delay=3, backoff=2, exceptions=(Exception,))
 async def face_swap(
     source_image: str,
     dest_image: str,
@@ -221,7 +223,10 @@ async def face_swap(
         progress_tracker[task_id] = "Initializing face swap"
         logger.debug(f"Initializing Gradio client for task {task_id}")
         try:
-            client = Client("Dentro/face-swap")
+            client = Client(
+                "Dentro/face-swap",
+                httpx_client=httpx.Client(timeout=CONFIG["GRADIO_TIMEOUT"])
+            )
         except Exception as e:
             logger.error(f"Failed to initialize Gradio client: {str(e)}")
             raise HTTPException(500, detail=f"Gradio client initialization failed: {str(e)}")
@@ -229,91 +234,113 @@ async def face_swap(
         progress_tracker[task_id] = "Processing high-quality face swap"
         logger.debug(f"Running face swap with source: {source_image}, dest: {dest_image}")
 
-        # Try multiple destination face indices to handle multiple faces
+        # Try multiple destination face indices to handle multiple faces (1-based)
         max_attempts = 5  # Maximum number of face indices to try
-        for idx in range(max_attempts):
+        for idx in range(1, max_attempts + 1):
             logger.debug(f"Trying face swap with destination index {idx}")
-            result = client.predict(
-                sourceImage=handle_file(source_image),
-                sourceFaceIndex=source_face_idx,
-                destinationImage=handle_file(dest_image),
-                destinationFaceIndex=idx,
-                api_name="/predict"
-            )
+            progress_tracker[task_id] = f"Trying face swap with destination index {idx}"
+            try:
+                result = client.predict(
+                    sourceImage=handle_file(source_image),
+                    sourceFaceIndex=source_face_idx,
+                    destinationImage=handle_file(dest_image),
+                    destinationFaceIndex=idx,
+                    api_name="/predict"
+                )
 
-            # Validate output image
-            if result and os.path.exists(result) and validate_image(result):
-                unique_filename = f"face_swap_{uuid.uuid4().hex}.png"
-                output_path = os.path.join(CONFIG["OUTPUT_FOLDER"], unique_filename)
-                
-                progress_tracker[task_id] = "Applying high-quality enhancements"
-                logger.debug(f"Saving face swap result to {output_path}")
-                with Image.open(result) as img:
-                    img = img.convert("RGB")
-                    img.save(
-                        output_path,
-                        "PNG",
-                        quality=CONFIG["QUALITY"],
-                        optimize=True,
-                        progressive=True
-                    )
-                high_quality_enhance(output_path)
-                
-                if not os.path.exists(output_path):
-                    logger.error(f"Output file {output_path} was not created")
-                    raise ValueError(f"Output file {output_path} was not created")
+                # Validate output image
+                if result and os.path.exists(result) and validate_image(result):
+                    unique_filename = f"face_swap_{uuid.uuid4().hex}.png"
+                    output_path = os.path.join(CONFIG["OUTPUT_FOLDER"], unique_filename)
+                    
+                    progress_tracker[task_id] = "Applying high-quality enhancements"
+                    logger.debug(f"Saving face swap result to {output_path}")
+                    with Image.open(result) as img:
+                        img = img.convert("RGB")
+                        img.save(
+                            output_path,
+                            "PNG",
+                            quality=CONFIG["QUALITY"],
+                            optimize=True,
+                            progressive=True
+                        )
+                    high_quality_enhance(output_path)
+                    
+                    if not os.path.exists(output_path):
+                        logger.error(f"Output file {output_path} was not created")
+                        raise ValueError(f"Output file {output_path} was not created")
 
-                logger.debug(f"Face swap completed with destination index {idx}, output saved to {output_path}")
-                progress_tracker[task_id] = "Completed"
-                return output_path
-            else:
-                logger.warning(f"Face swap attempt with destination index {idx} failed or produced invalid result")
+                    logger.debug(f"Face swap completed with destination index {idx}, output saved to {output_path}")
+                    progress_tracker[task_id] = "Completed"
+                    return output_path
+                else:
+                    logger.warning(f"Face swap attempt with destination index {idx} failed or produced invalid result")
+                    progress_tracker[task_id] = f"Face swap attempt with destination index {idx} failed"
+            except Exception as e:
+                logger.warning(f"Face swap attempt with destination index {idx} failed: {str(e)}")
+                progress_tracker[task_id] = f"Face swap attempt with destination index {idx} failed: {str(e)}"
+                continue
 
-        # If all attempts fail, try alternative source indices
-        for src_idx in [0, 2]:
+        # If all attempts fail, try alternative source indices (1-based)
+        for src_idx in [1, 2, 3]:
             if src_idx != source_face_idx:
-                for dest_idx in range(max_attempts):
+                for dest_idx in range(1, max_attempts + 1):
                     logger.debug(f"Trying fallback with source index {src_idx} and destination index {dest_idx}")
-                    result = client.predict(
-                        sourceImage=handle_file(source_image),
-                        sourceFaceIndex=src_idx,
-                        destinationImage=handle_file(dest_image),
-                        destinationFaceIndex=dest_idx,
-                        api_name="/predict"
-                    )
-                    if result and os.path.exists(result) and validate_image(result):
-                        unique_filename = f"face_swap_{uuid.uuid4().hex}.png"
-                        output_path = os.path.join(CONFIG["OUTPUT_FOLDER"], unique_filename)
-                        
-                        progress_tracker[task_id] = "Applying high-quality enhancements"
-                        logger.debug(f"Saving face swap result to {output_path}")
-                        with Image.open(result) as img:
-                            img = img.convert("RGB")
-                            img.save(
-                                output_path,
-                                "PNG",
-                                quality=CONFIG["QUALITY"],
-                                optimize=True,
-                                progressive=True
-                            )
-                        high_quality_enhance(output_path)
-                        
-                        if not os.path.exists(output_path):
-                            logger.error(f"Output file {output_path} was not created")
-                            raise ValueError(f"Output file {output_path} was not created")
+                    progress_tracker[task_id] = f"Trying fallback with source index {src_idx} and destination index {dest_idx}"
+                    try:
+                        result = client.predict(
+                            sourceImage=handle_file(source_image),
+                            sourceFaceIndex=src_idx,
+                            destinationImage=handle_file(dest_image),
+                            destinationFaceIndex=dest_idx,
+                            api_name="/predict"
+                        )
+                        if result and os.path.exists(result) and validate_image(result):
+                            unique_filename = f"face_swap_{uuid.uuid4().hex}.png"
+                            output_path = os.path.join(CONFIG["OUTPUT_FOLDER"], unique_filename)
+                            
+                            progress_tracker[task_id] = "Applying high-quality enhancements"
+                            logger.debug(f"Saving face swap result to {output_path}")
+                            with Image.open(result) as img:
+                                img = img.convert("RGB")
+                                img.save(
+                                    output_path,
+                                    "PNG",
+                                    quality=CONFIG["QUALITY"],
+                                    optimize=True,
+                                    progressive=True
+                                )
+                            high_quality_enhance(output_path)
+                            
+                            if not os.path.exists(output_path):
+                                logger.error(f"Output file {output_path} was not created")
+                                raise ValueError(f"Output file {output_path} was not created")
 
-                        logger.debug(f"Face swap completed with source index {src_idx}, destination index {dest_idx}")
-                        progress_tracker[task_id] = "Completed"
-                        return output_path
-                    else:
-                        logger.warning(f"Fallback attempt with source index {src_idx} and destination index {dest_idx} failed")
+                            logger.debug(f"Face swap completed with source index {src_idx}, destination index {dest_idx}")
+                            progress_tracker[task_id] = "Completed"
+                            return output_path
+                        else:
+                            logger.warning(f"Fallback attempt with source index {src_idx} and destination index {dest_idx} failed")
+                            progress_tracker[task_id] = f"Fallback attempt with source index {src_idx} and destination index {dest_idx} failed"
+                    except Exception as e:
+                        logger.warning(f"Fallback attempt with source index {src_idx} and destination index {dest_idx} failed: {str(e)}")
+                        progress_tracker[task_id] = f"Fallback attempt with source index {src_idx} and destination index {dest_idx} failed: {str(e)}"
+                        continue
 
         logger.error(f"All face swap attempts failed for task {task_id}")
+        progress_tracker[task_id] = "Error: All face swap attempts failed"
         raise ValueError("All face swap attempts failed")
     except Exception as e:
         progress_tracker[task_id] = f"Error: {str(e)}"
         logger.error(f"Face swap failed: {str(e)} with files {source_image}, {dest_image}")
         raise
+    finally:
+        if 'client' in locals():
+            try:
+                client.close()
+                logger.debug(f"Gradio client closed for task {task_id}")
+            except Exception as e:
+                logger.warning(f"Failed to close Gradio client: {str(e)}")
 
 @app.options("/shopify-face-swap", description="Handle CORS preflight requests")
 async def cors_preflight():
