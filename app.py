@@ -264,7 +264,7 @@ async def face_swap(
                     )
                 size, width, height = get_image_size(temp_output_path)
                 logger.info(f"Face swap with destination face number {dest_face_idx} succeeded, size: {width}x{height} ({size} pixels)")
-                progress_tracker[task_id] = f"Face swap with destination face number {dest_face_idx} succeeded, size: {width}x{height} ({size} pixels)")
+                progress_tracker[task_id] = f"Face swap with destination face number {dest_face_idx} succeeded, size: {width}x{height} ({size} pixels)"
             else:
                 logger.warning(f"Face swap attempt with destination face number {dest_face_idx} failed or produced invalid result")
                 progress_tracker[task_id] = f"Face swap attempt with destination face number {dest_face_idx} failed"
