@@ -153,7 +153,7 @@ def high_quality_preprocess(content: bytes) -> bytes:
                 original_size = img.size
                 img.thumbnail((1920, 1920), Image.Resampling.LANCZOS)
                 if img.size != original_size:
-                    img = img.resize(original_size, Image.Resampling.LANCZOS)
+                    img = img.resize(original_size, Image.Resampling.LANCOS)
             
             img = ImageEnhance.Color(img).enhance(1.05)
             img = ImageEnhance.Contrast(img).enhance(1.02)
@@ -270,7 +270,7 @@ async def face_swap(
                     size, width, height = get_image_size(temp_output_path)
                     results.append((temp_output_path, size, width, height, dest_idx))
                     logger.info(f"Face swap with destination face number {dest_idx} succeeded, size: {width}x{height} ({size} pixels)")
-                    progress_tracker[task_id] = f"Face swap with destination face number {dest_idx} succeeded, size: {width}x{height} ({size} pixels)")
+                    progress_tracker[task_id] = f"Face swap with destination face number {dest_idx} succeeded, size: {width}x{height} ({size} pixels)"
                 else:
                     logger.warning(f"Face swap attempt with destination face number {dest_idx} failed or produced invalid result")
                     progress_tracker[task_id] = f"Face swap attempt with destination face number {dest_idx} failed"
@@ -312,7 +312,7 @@ async def face_swap(
                 raise ValueError(f"Output file {output_path} was not created")
 
             logger.info(f"Completed face swap with largest face at face number {best_idx} (size: {best_width}x{best_height}, {best_size} pixels)")
-            progress_tracker[task_id] = f"Completed with largest face at face number {best_idx} (size: {best_width}x{best_height}, {best_size} pixels)")
+            progress_tracker[task_id] = f"Completed with largest face at face number {best_idx} (size: {best_width}x{best_height}, {best_size} pixels)"
             return output_path
 
         logger.error(f"No valid face swap results for task {task_id}")
@@ -397,7 +397,7 @@ async def swap_faces(
                 "success": True,
                 "data": {"result_image": result_url, "task_id": task_id},
                 "error": None
-            }, headers={"X-Process-Time": f"{time.time() - start_time:.2f}"))
+            }, headers={"X-Process-Time": f"{time.time() - start_time:.2f}"})
 
         with tempfile.TemporaryDirectory() as temp_dir:
             source_filename = f"source_{uuid.uuid4().hex}.{source_image.filename.rsplit('.', 1)[1]}"
@@ -527,7 +527,7 @@ async def shopify_face_swap(
                 "success": True,
                 "data": {"result_image": result_url, "task_id": task_id},
                 "error": None
-            }, headers={"X-Process-Time": f"{time.time() - start_time:.2f}"))
+            }, headers={"X-Process-Time": f"{time.time() - start_time:.2f}"})
 
         with tempfile.TemporaryDirectory() as temp_dir:
             user_filename = f"user_{uuid.uuid4().hex}.{user_image.filename.rsplit('.', 1)[1]}"
