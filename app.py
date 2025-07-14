@@ -503,8 +503,7 @@ async def shopify_face_swap(
 
         # Determine destination face index based on product_image_url
         dest_face_idx = 1  # Default to 1 for all other images
-        if product_image_url == "https://novatrx.com/cdn/shop/files/REDKNIGHT.webp?v=1742456234&width=1100" or \
-           product_image_url == "https://novatrx.com/cdn/shop/files/TEACHER.webp?v=1742456443&width=713":
+        if "TEACHER.webp" in product_image_url or "REDKNIGHT.webp" in product_image_url:
             dest_face_idx = 3
 
         cache_key = f"{get_file_hash(user_content)}:{get_file_hash(product_content)}:{dest_face_idx}"
