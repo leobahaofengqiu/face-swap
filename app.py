@@ -6,7 +6,7 @@ import time
 import logging
 import requests
 from pathlib import Path
-from typing import Optional, Dict, Tuple
+from typing import Optional, Dict, Tuple, List
 from fastapi import FastAPI, File, UploadFile, Request, BackgroundTasks, HTTPException, Form
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
@@ -101,7 +101,6 @@ def validate_image(file_path: str) -> bool:
             if img.format.lower() not in CONFIG["ALLOWED_EXTENSIONS"]:
                 logger.error(f"Image format {img.format} not in allowed extensions")
                 return False
-            # Check for minimum file size to avoid blank or corrupted images
             if os.path.getsize(file_path) < CONFIG["MIN_IMAGE_SIZE"]:
                 logger.error(f"Image too small or potentially corrupted: {file_path}")
                 return False
@@ -221,8 +220,6 @@ async def cleanup_output_folder():
 async def face_swap(
     source_image: str,
     dest_image: str,
-    source_face_idx: int = 1,
-    dest_face_idx: int = 1,
     task_id: str = None
 ) -> str:
     try:
@@ -237,30 +234,30 @@ async def face_swap(
             logger.error(f"Failed to initialize Gradio client: {str(e)}")
             raise HTTPException(500, detail=f"Gradio client initialization failed: {str(e)}")
 
-        progress_tracker[task_id] = "Processing high-quality face swap"
-        logger.debug(f"Running face swap with source: {source_image}, dest: {dest_image}")
+        progress_tracker[task_id] = "Detecting faces and processing swap"
+        logger.debug(f"Starting face swap with source: {source_image}, dest: {dest_image}")
 
-        # Try all destination face indices to find the largest face (1-based)
-        max_attempts = 6  # Increased to handle up to 6 faces
-        results = []  # Store (output_path, size, width, height, dest_idx) tuples
-        for idx in range(1, max_attempts + 1):
-            logger.info(f"Trying face swap with destination face number {idx}")
-            progress_tracker[task_id] = f"Trying face swap with destination face number {idx}"
+        # Maximum number of face indices to try
+        max_attempts = 6
+        results: List[Tuple[str, int, int, int, int]] = []  # (output_path, size, width, height, dest_idx)
+
+        # Try swapping the first source face with all destination faces
+        for dest_idx in range(1, max_attempts + 1):
+            logger.info(f"Trying face swap with destination face number {dest_idx}")
+            progress_tracker[task_id] = f"Trying face swap with destination face number {dest_idx}"
             try:
                 with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as temp_output:
                     temp_output_path = temp_output.name
                 
                 result = client.predict(
                     sourceImage=handle_file(source_image),
-                    sourceFaceIndex=source_face_idx,
+                    sourceFaceIndex=1,  # Use the first face from source
                     destinationImage=handle_file(dest_image),
-                    destinationFaceIndex=idx,
+                    destinationFaceIndex=dest_idx,
                     api_name="/predict"
                 )
 
-                # Validate output image
                 if result and os.path.exists(result) and validate_image(result):
-                    # Copy result to temporary file for size evaluation
                     with Image.open(result) as img:
                         img = img.convert("RGB")
                         img.save(
@@ -271,22 +268,22 @@ async def face_swap(
                             progressive=True
                         )
                     size, width, height = get_image_size(temp_output_path)
-                    results.append((temp_output_path, size, width, height, idx))
-                    logger.info(f"Face swap with destination face number {idx} succeeded, size: {width}x{height} ({size} pixels)")
-                    progress_tracker[task_id] = f"Face swap with destination face number {idx} succeeded, size: {width}x{height} ({size} pixels)"
+                    results.append((temp_output_path, size, width, height, dest_idx))
+                    logger.info(f"Face swap with destination face number {dest_idx} succeeded, size: {width}x{height} ({size} pixels)")
+                    progress_tracker[task_id] = f"Face swap with destination face number {dest_idx} succeeded, size: {width}x{height} ({size} pixels)")
                 else:
-                    logger.warning(f"Face swap attempt with destination face number {idx} failed or produced invalid result")
-                    progress_tracker[task_id] = f"Face swap attempt with destination face number {idx} failed"
+                    logger.warning(f"Face swap attempt with destination face number {dest_idx} failed or produced invalid result")
+                    progress_tracker[task_id] = f"Face swap attempt with destination face number {dest_idx} failed"
                     if os.path.exists(temp_output_path):
                         os.unlink(temp_output_path)
             except Exception as e:
-                logger.warning(f"Face swap attempt with destination face number {idx} failed: {str(e)}")
-                progress_tracker[task_id] = f"Face swap attempt with destination face number {idx} failed: {str(e)}"
+                logger.warning(f"Face swap attempt with destination face number {dest_idx} failed: {str(e)}")
+                progress_tracker[task_id] = f"Face swap attempt with destination face number {dest_idx} failed: {str(e)}"
                 if os.path.exists(temp_output_path):
                     os.unlink(temp_output_path)
                 continue
 
-        # Select the result with the largest size
+        # Select the result with the largest size if multiple faces are detected
         if results:
             best_result_path, best_size, best_width, best_height, best_idx = max(results, key=lambda x: x[1])
             unique_filename = f"face_swap_{uuid.uuid4().hex}.png"
@@ -315,87 +312,13 @@ async def face_swap(
                 raise ValueError(f"Output file {output_path} was not created")
 
             logger.info(f"Completed face swap with largest face at face number {best_idx} (size: {best_width}x{best_height}, {best_size} pixels)")
-            progress_tracker[task_id] = f"Completed with largest face at face number {best_idx} (size: {best_width}x{best_height}, {best_size} pixels)"
+            progress_tracker[task_id] = f"Completed with largest face at face number {best_idx} (size: {best_width}x{best_height}, {best_size} pixels)")
             return output_path
 
-        # If no valid destination results, try alternative source indices (1-based)
-        for src_idx in [1, 2, 3]:
-            if src_idx != source_face_idx:
-                results = []
-                for dest_idx in range(1, max_attempts + 1):
-                    logger.info(f"Trying fallback with source face number {src_idx} and destination face number {dest_idx}")
-                    progress_tracker[task_id] = f"Trying fallback with source face number {src_idx} and destination face number {dest_idx}"
-                    try:
-                        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as temp_output:
-                            temp_output_path = temp_output.name
-                        
-                        result = client.predict(
-                            sourceImage=handle_file(source_image),
-                            sourceFaceIndex=src_idx,
-                            destinationImage=handle_file(dest_image),
-                            destinationFaceIndex=dest_idx,
-                            api_name="/predict"
-                        )
-                        if result and os.path.exists(result) and validate_image(result):
-                            with Image.open(result) as img:
-                                img = img.convert("RGB")
-                                img.save(
-                                    temp_output_path,
-                                    "PNG",
-                                    quality=CONFIG["QUALITY"],
-                                    optimize=True,
-                                    progressive=True
-                                )
-                            size, width, height = get_image_size(temp_output_path)
-                            results.append((temp_output_path, size, width, height, dest_idx))
-                            logger.info(f"Fallback with source face number {src_idx}, destination face number {dest_idx} succeeded, size: {width}x{height} ({size} pixels)")
-                            progress_tracker[task_id] = f"Fallback with source face number {src_idx}, destination face number {dest_idx} succeeded, size: {width}x{height} ({size} pixels)"
-                        else:
-                            logger.warning(f"Fallback attempt with source face number {src_idx} and destination face number {dest_idx} failed")
-                            progress_tracker[task_id] = f"Fallback attempt with source face number {src_idx} and destination face number {dest_idx} failed"
-                            if os.path.exists(temp_output_path):
-                                os.unlink(temp_output_path)
-                    except Exception as e:
-                        logger.warning(f"Fallback attempt with source face number {src_idx} and destination face number {dest_idx} failed: {str(e)}")
-                        progress_tracker[task_id] = f"Fallback attempt with source face number {src_idx} and destination face number {dest_idx} failed: {str(e)}"
-                        if os.path.exists(temp_output_path):
-                            os.unlink(temp_output_path)
-                        continue
+        logger.error(f"No valid face swap results for task {task_id}")
+        progress_tracker[task_id] = "Error: No valid face swap results"
+        raise ValueError("No valid face swap results")
 
-                if results:
-                    best_result_path, best_size, best_width, best_height, best_idx = max(results, key=lambda x: x[1])
-                    unique_filename = f"face_swap_{uuid.uuid4().hex}.png"
-                    output_path = os.path.join(CONFIG["OUTPUT_FOLDER"], unique_filename)
-                    
-                    progress_tracker[task_id] = "Applying high-quality enhancements"
-                    logger.debug(f"Saving best fallback result (source face number {src_idx}, destination face number {best_idx}, size {best_width}x{best_height}) to {output_path}")
-                    with Image.open(best_result_path) as img:
-                        img = img.convert("RGB")
-                        img.save(
-                            output_path,
-                            "PNG",
-                            quality=CONFIG["QUALITY"],
-                            optimize=True,
-                            progressive=True
-                        )
-                    high_quality_enhance(output_path)
-                    
-                    # Clean up temporary files
-                    for temp_path, _, _, _, _ in results:
-                        if os.path.exists(temp_path):
-                            os.unlink(temp_path)
-                    
-                    if not os.path.exists(output_path):
-                        logger.error(f"Output file {output_path} was not created")
-                        raise ValueError(f"Output file {output_path} was not created")
-
-                    logger.info(f"Completed face swap with source face number {src_idx}, largest destination face at face number {best_idx} (size: {best_width}x{best_height}, {best_size} pixels)")
-                    progress_tracker[task_id] = f"Completed with source face number {src_idx}, largest destination face at face number {best_idx} (size: {best_width}x{best_height}, {best_size} pixels)"
-                    return output_path
-
-        logger.error(f"All face swap attempts failed for task {task_id}")
-        progress_tracker[task_id] = "Error: All face swap attempts failed"
-        raise ValueError("All face swap attempts failed")
     except Exception as e:
         progress_tracker[task_id] = f"Error: {str(e)}"
         logger.error(f"Face swap failed: {str(e)} with files {source_image}, {dest_image}")
@@ -432,8 +355,6 @@ async def index(request: Request):
 async def swap_faces(
     source_image: UploadFile = File(...),
     dest_image: UploadFile = File(...),
-    source_face_idx: int = 1,
-    dest_face_idx: int = 1,
     background_tasks: BackgroundTasks = None
 ):
     start_time = time.time()
@@ -463,7 +384,7 @@ async def swap_faces(
         source_content = high_quality_preprocess(source_content)
         dest_content = high_quality_preprocess(dest_content)
 
-        cache_key = f"{get_file_hash(source_content)}:{get_file_hash(dest_content)}:{source_face_idx}:{dest_face_idx}"
+        cache_key = f"{get_file_hash(source_content)}:{get_file_hash(dest_content)}"
 
         if cache_key in cache:
             result_url = f"/{cache[cache_key]}"
@@ -476,7 +397,7 @@ async def swap_faces(
                 "success": True,
                 "data": {"result_image": result_url, "task_id": task_id},
                 "error": None
-            }, headers={"X-Process-Time": f"{time.time() - start_time:.2f}"})
+            }, headers={"X-Process-Time": f"{time.time() - start_time:.2f}"))
 
         with tempfile.TemporaryDirectory() as temp_dir:
             source_filename = f"source_{uuid.uuid4().hex}.{source_image.filename.rsplit('.', 1)[1]}"
@@ -489,7 +410,7 @@ async def swap_faces(
             with open(dest_path, "wb") as f:
                 f.write(dest_content)
 
-            result = await face_swap(source_path, dest_path, source_face_idx, dest_face_idx, task_id)
+            result = await face_swap(source_path, dest_path, task_id)
             cache[cache_key] = result
             logger.info(f"Cached high-quality result: {result}")
 
@@ -594,7 +515,7 @@ async def shopify_face_swap(
         user_content = high_quality_preprocess(user_content)
         product_content = high_quality_preprocess(product_content)
 
-        cache_key = f"{get_file_hash(user_content)}:{get_file_hash(product_content)}:1:1"
+        cache_key = f"{get_file_hash(user_content)}:{get_file_hash(product_content)}"
         if cache_key in cache:
             result_url = f"/{cache[cache_key]}"
             logger.info(f"Cache hit: {result_url}")
@@ -606,7 +527,7 @@ async def shopify_face_swap(
                 "success": True,
                 "data": {"result_image": result_url, "task_id": task_id},
                 "error": None
-            }, headers={"X-Process-Time": f"{time.time() - start_time:.2f}"})
+            }, headers={"X-Process-Time": f"{time.time() - start_time:.2f}"))
 
         with tempfile.TemporaryDirectory() as temp_dir:
             user_filename = f"user_{uuid.uuid4().hex}.{user_image.filename.rsplit('.', 1)[1]}"
@@ -620,7 +541,7 @@ async def shopify_face_swap(
             with open(product_path, "wb") as f:
                 f.write(product_content)
 
-            result = await face_swap(user_path, product_path, 1, 1, task_id)
+            result = await face_swap(user_path, product_path, task_id)
             cache[cache_key] = result
             logger.info(f"Cached high-quality result: {result}")
 
