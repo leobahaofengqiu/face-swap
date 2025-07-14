@@ -503,8 +503,10 @@ async def shopify_face_swap(
 
         # Determine destination face index based on product_image_url
         dest_face_idx = 1  # Default to 1 for all other images
-        if "TEACHER.webp" in product_image_url or "REDKNIGHT.webp" in product_image_url:
+        if "TEACHER.webp" in product_image_url:
             dest_face_idx = 3
+        elif "REDKNIGHT.webp" in product_image_url:
+            dest_face_idx = 4
 
         cache_key = f"{get_file_hash(user_content)}:{get_file_hash(product_content)}:{dest_face_idx}"
         if cache_key in cache:
