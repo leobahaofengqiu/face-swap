@@ -291,13 +291,13 @@ async def face_swap(
             upscaler_client = Client("gokaygokay/Tile-Upscaler")
             enhanced_result = upscaler_client.predict(
                 param_0=handle_file(temp_output_path),
-                param_1=1024,  # Tile size (changed to 1024)
-                param_2=20,    # Denoising steps
-                param_3=0.4,   # CFG scale
+                param_1=1280,  # Tile size (changed to 1280)
+                param_2=20,    # Number of inference steps
+                param_3=0.4,   # Strength (CFG scale)
                 param_4=0,     # Seed (0 for random)
-                param_5=3,     # Upscale factor
+                param_5=3,     # Guidance scale (upscale factor)
                 api_name="/wrapper",
-                _request_timeout=60  # Added timeout for debugging
+                _request_timeout=60  # Timeout for debugging
             )
             logger.debug(f"Tile-Upscaler result: {enhanced_result}")
 
