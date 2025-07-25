@@ -284,7 +284,7 @@ async def face_swap(
             except Exception as e:
                 logger.warning(f"Failed to close Gradio client: {str(e)}")
 
-        # Apply Tile-Upscaler enhancement
+        # Apply Tile-Upscaler enhancement (mandatory)
         progress_tracker[task_id] = "Applying Tile-Upscaler enhancement"
         logger.debug(f"Initializing Tile-Upscaler client for task {task_id}")
         try:
@@ -298,9 +298,26 @@ async def face_swap(
                 param_5=3,    # Upscale factor
                 api_name="/wrapper"
             )
-            
-            if enhanced_result and os.path.exists(enhanced_result) and validate_image(enhanced_result):
-                with Image.open(enhanced_result) as img:
+            logger.debug(f"Tile-Upscaler result: {enhanced_result}")
+
+            # Handle case where enhanced_result might be a list
+            enhanced_path = None
+            if isinstance(enhanced_result, list):
+                for item in enhanced_result:
+                    if isinstance(item, str) and os.path.exists(item) and validate_image(item):
+                        enhanced_path = item
+                        break
+                if not enhanced_path:
+                    logger.warning(f"Tile-Upscaler returned a list but no valid image path found: {enhanced_result}")
+                    progress_tracker[task_id] = f"Tile-Upscaler failed: No valid image path in list"
+            elif isinstance(enhanced_result, str) and os.path.exists(enhanced_result) and validate_image(enhanced_result):
+                enhanced_path = enhanced_result
+            else:
+                logger.warning(f"Tile-Upscaler returned invalid result: {enhanced_result}")
+                progress_tracker[task_id] = f"Tile-Upscaler failed: Invalid result"
+
+            if enhanced_path:
+                with Image.open(enhanced_path) as img:
                     img = img.convert("RGB")
                     img.save(
                         temp_output_path,
@@ -313,15 +330,14 @@ async def face_swap(
                 logger.info(f"Tile-Upscaler enhancement succeeded, size: {width}x{height} ({size} pixels)")
                 progress_tracker[task_id] = f"Tile-Upscaler enhancement succeeded, size: {width}x{height} ({size} pixels)"
             else:
-                logger.warning(f"Tile-Upscaler enhancement failed or produced invalid result")
-                progress_tracker[task_id] = f"Tile-Upscaler enhancement failed"
-                # Proceed with original face swap result if enhancement fails
+                logger.warning(f"Tile-Upscaler enhancement failed, proceeding with original face swap result")
+                progress_tracker[task_id] = f"Tile-Upscaler failed, proceeding with original face swap result"
+
             upscaler_client.close()
             logger.debug(f"Tile-Upscaler client closed for task {task_id}")
         except Exception as e:
-            logger.warning(f"Tile-Upscaler enhancement failed: {str(e)}")
-            progress_tracker[task_id] = f"Tile-Upscaler enhancement failed: {str(e)}"
-            # Proceed with original face swap result if enhancement fails
+            logger.warning(f"Tile-Upscaler enhancement failed: {str(e)}, proceeding with original face swap result")
+            progress_tracker[task_id] = f"Tile-Upscaler failed: {str(e)}, proceeding with original face swap result"
 
         unique_filename = f"face_swap_{uuid.uuid4().hex}.png"
         output_path = os.path.join(CONFIG["OUTPUT_FOLDER"], unique_filename)
