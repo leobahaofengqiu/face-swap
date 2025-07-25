@@ -40,7 +40,7 @@ app.add_middleware(
 # Configuration
 CONFIG = {
     "UPLOAD_FOLDER": os.getenv("UPLOAD_FOLDER", "static/uploads"),
-    "OUTPUT_FOLDER": os.getenv("OUTPUT_FOLDER", "static/output"),
+    "OUTPUT_FOLDER": os.getenv("UPLOAD_FOLDER", "static/output"),
     "STATIC_DIR": "static",
     "ALLOWED_EXTENSIONS": {'png', 'jpg', 'jpeg', 'webp'},
     "MAX_FILE_SIZE": int(os.getenv("MAX_FILE_SIZE", 30 * 1024 * 1024)),  # 30MB
@@ -284,24 +284,27 @@ async def face_swap(
             except Exception as e:
                 logger.warning(f"Failed to close Gradio client: {str(e)}")
 
-        # Apply Tile-Upscaler enhancement (mandatory)
-        progress_tracker[task_id] = "Applying Tile-Upscaler enhancement"
-        logger.debug(f"Initializing Tile-Upscaler client for task {task_id}")
+        # Apply Tile-Upscaler enhancement twice (mandatory)
+        progress_tracker[task_id] = "Applying first Tile-Upscaler enhancement"
+        logger.debug(f"Initializing Tile-Upscaler client for first pass, task {task_id}")
         try:
             upscaler_client = Client("gokaygokay/Tile-Upscaler")
+            
+            # First Tile-Upscaler pass
+            logger.debug(f"Calling Tile-Upscaler (pass 1) with params: tile_size=768, steps=20, cfg_scale=0.4, upscale_factor=3")
             enhanced_result = upscaler_client.predict(
                 param_0=handle_file(temp_output_path),
-                param_1=1280,  # Tile size (changed to 1280)
+                param_1=768,   # Tile size
                 param_2=20,    # Number of inference steps
                 param_3=0.4,   # Strength (CFG scale)
                 param_4=0,     # Seed (0 for random)
                 param_5=3,     # Guidance scale (upscale factor)
                 api_name="/wrapper",
-                _request_timeout=60  # Timeout for debugging
+                _request_timeout=60
             )
-            logger.debug(f"Tile-Upscaler result: {enhanced_result}")
+            logger.debug(f"Tile-Upscaler first pass result: {enhanced_result}")
 
-            # Handle case where enhanced_result might be a list
+            # Handle first pass result
             enhanced_path = None
             if isinstance(enhanced_result, list):
                 for item in enhanced_result:
@@ -309,13 +312,13 @@ async def face_swap(
                         enhanced_path = item
                         break
                 if not enhanced_path:
-                    logger.warning(f"Tile-Upscaler returned a list but no valid image path found: {enhanced_result}")
-                    progress_tracker[task_id] = f"Tile-Upscaler failed: No valid image path in list"
+                    logger.warning(f"Tile-Upscaler first pass returned a list but no valid image path found: {enhanced_result}")
+                    progress_tracker[task_id] = f"Tile-Upscaler first pass failed: No valid image path in list"
             elif isinstance(enhanced_result, str) and os.path.exists(enhanced_result) and validate_image(enhanced_result):
                 enhanced_path = enhanced_result
             else:
-                logger.warning(f"Tile-Upscaler returned invalid result: {enhanced_result}")
-                progress_tracker[task_id] = f"Tile-Upscaler failed: Invalid result"
+                logger.warning(f"Tile-Upscaler first pass returned invalid result: {enhanced_result}")
+                progress_tracker[task_id] = f"Tile-Upscaler first pass failed: Invalid result"
 
             if enhanced_path:
                 with Image.open(enhanced_path) as img:
@@ -328,11 +331,59 @@ async def face_swap(
                         progressive=True
                     )
                 size, width, height = get_image_size(temp_output_path)
-                logger.info(f"Tile-Upscaler enhancement succeeded, size: {width}x{height} ({size} pixels)")
-                progress_tracker[task_id] = f"Tile-Upscaler enhancement succeeded, size: {width}x{height} ({size} pixels)"
+                logger.info(f"First Tile-Upscaler enhancement succeeded, size: {width}x{height} ({size} pixels)")
+                progress_tracker[task_id] = f"First Tile-Upscaler enhancement succeeded, size: {width}x{height} ({size} pixels)"
             else:
-                logger.warning(f"Tile-Upscaler enhancement failed, proceeding with original face swap result")
-                progress_tracker[task_id] = f"Tile-Upscaler failed, proceeding with original face swap result"
+                logger.warning(f"Tile-Upscaler first pass failed, proceeding with original face swap result")
+                progress_tracker[task_id] = f"Tile-Upscaler first pass failed, proceeding with original face swap result"
+
+            # Second Tile-Upscaler pass (if first pass succeeded or not)
+            progress_tracker[task_id] = "Applying second Tile-Upscaler enhancement"
+            logger.debug(f"Calling Tile-Upscaler (pass 2) with params: tile_size=768, steps=20, cfg_scale=0.4, upscale_factor=3")
+            enhanced_result = upscaler_client.predict(
+                param_0=handle_file(temp_output_path),
+                param_1=768,   # Tile size
+                param_2=20,    # Number of inference steps
+                param_3=0.4,   # Strength (CFG scale)
+                param_4=0,     # Seed (0 for random)
+                param_5=3,     # Guidance scale (upscale factor)
+                api_name="/wrapper",
+                _request_timeout=60
+            )
+            logger.debug(f"Tile-Upscaler second pass result: {enhanced_result}")
+
+            # Handle second pass result
+            enhanced_path = None
+            if isinstance(enhanced_result, list):
+                for item in enhanced_result:
+                    if isinstance(item, str) and os.path.exists(item) and validate_image(item):
+                        enhanced_path = item
+                        break
+                if not enhanced_path:
+                    logger.warning(f"Tile-Upscaler second pass returned a list but no valid image path found: {enhanced_result}")
+                    progress_tracker[task_id] = f"Tile-Upscaler second pass failed: No valid image path in list"
+            elif isinstance(enhanced_result, str) and os.path.exists(enhanced_result) and validate_image(enhanced_result):
+                enhanced_path = enhanced_result
+            else:
+                logger.warning(f"Tile-Upscaler second pass returned invalid result: {enhanced_result}")
+                progress_tracker[task_id] = f"Tile-Upscaler second pass failed: Invalid result"
+
+            if enhanced_path:
+                with Image.open(enhanced_path) as img:
+                    img = img.convert("RGB")
+                    img.save(
+                        temp_output_path,
+                        "PNG",
+                        quality=CONFIG["QUALITY"],
+                        optimize=True,
+                        progressive=True
+                    )
+                size, width, height = get_image_size(temp_output_path)
+                logger.info(f"Second Tile-Upscaler enhancement succeeded, size: {width}x{height} ({size} pixels)")
+                progress_tracker[task_id] = f"Second Tile-Upscaler enhancement succeeded, size: {width}x{height} ({size} pixels)"
+            else:
+                logger.warning(f"Tile-Upscaler second pass failed, proceeding with previous result")
+                progress_tracker[task_id] = f"Tile-Upscaler second pass failed, proceeding with previous result"
 
             upscaler_client.close()
             logger.debug(f"Tile-Upscaler client closed for task {task_id}")
