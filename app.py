@@ -12,11 +12,12 @@ from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from PIL import Image, ImageEnhance, ImageFilter
+from PIL import Image
 from cachetools import TTLCache
 from gradio_client import Client, handle_file
 from retry import retry
 import asyncio
+import shutil
 
 # Configure logging
 logging.basicConfig(
@@ -155,9 +156,6 @@ def high_quality_preprocess(content: bytes) -> bytes:
                 if img.size != original_size:
                     img = img.resize(original_size, Image.Resampling.LANCZOS)
             
-            img = ImageEnhance.Color(img).enhance(1.05)
-            img = ImageEnhance.Contrast(img).enhance(1.02)
-            
             with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as output_file:
                 img.save(
                     output_file.name,
@@ -177,33 +175,59 @@ def high_quality_preprocess(content: bytes) -> bytes:
         logger.error(f"Image preprocessing failed: {str(e)}")
         return content
 
-def high_quality_enhance(image_path: str, enhancements: Dict[str, float] = None) -> None:
+async def high_quality_enhance(image_path: str) -> None:
     try:
-        enhancements = enhancements or {
-            "sharpness": 1.15,
-            "contrast": 1.02,
-            "brightness": 1.03,
-            "color": 1.05
-        }
-
+        # Initialize Gradio client for Tile-Upscaler
+        logger.debug(f"Initializing Tile-Upscaler client for {image_path}")
+        client = Client("gokaygokay/Tile-Upscaler", httpx_kwargs={"timeout": 60.0})
+        
+        # Perform enhancement
+        result = client.predict(
+            param_0=handle_file(image_path),
+            param_1=512,
+            param_2=20,
+            param_3=0.4,
+            param_4=0,
+            param_5=3,
+            api_name="/wrapper"
+        )
+        
+        # Assuming result contains a list of file paths, use the first one
+        if not result or not isinstance(result, list) or not result:
+            logger.error(f"No valid enhanced image returned for {image_path}")
+            raise ValueError("No valid enhanced image returned")
+        
+        enhanced_path = result[0]
+        if not os.path.exists(enhanced_path):
+            logger.error(f"Enhanced image file {enhanced_path} does not exist")
+            raise ValueError(f"Enhanced image file {enhanced_path} does not exist")
+        
+        # Copy enhanced image to original path
+        shutil.copy(enhanced_path, image_path)
+        logger.debug(f"Enhanced image copied to {image_path}")
+        
+        # Save as PNG with high quality
         with Image.open(image_path) as img:
             img = img.convert("RGB")
-            img = ImageEnhance.Sharpness(img).enhance(enhancements["sharpness"])
-            img = ImageEnhance.Contrast(img).enhance(enhancements["contrast"])
-            img = ImageEnhance.Brightness(img).enhance(enhancements["brightness"])
-            img = ImageEnhance.Color(img).enhance(enhancements["color"])
-            img = img.filter(ImageFilter.UnsharpMask(radius=1.0, percent=100, threshold=3))
             img.save(
                 image_path,
                 "PNG",
-                optimize=True,
                 quality=CONFIG["QUALITY"],
+                optimize=True,
                 progressive=True
             )
-        logger.debug(f"Image enhancements applied to {image_path}")
+        logger.info(f"Image enhancement completed for {image_path}")
+        
     except Exception as e:
         logger.error(f"Image enhancement failed for {image_path}: {str(e)}")
         raise
+    finally:
+        if 'client' in locals():
+            try:
+                client.close()
+                logger.debug(f"Tile-Upscaler client closed for {image_path}")
+            except Exception as e:
+                logger.warning(f"Failed to close Tile-Upscaler client: {str(e)}")
 
 async def cleanup_output_folder():
     try:
@@ -292,7 +316,7 @@ async def face_swap(
                 optimize=True,
                 progressive=True
             )
-        high_quality_enhance(output_path)
+        await high_quality_enhance(output_path)
         
         if os.path.exists(temp_output_path):
             os.unlink(temp_output_path)
