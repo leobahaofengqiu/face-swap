@@ -47,11 +47,11 @@ CONFIG = {
     "MAX_FILE_SIZE": int(os.getenv("MAX_FILE_SIZE", 30 * 1024 * 1024)),  # 30MB
     "CACHE_TTL": int(os.getenv("CACHE_TTL", 7200)),  # 2 hours
     "MAX_CACHE_SIZE": int(os.getenv("MAX_CACHE_SIZE", 100)),
-    "CLEANUP_INTERVAL": int(os.getenv("CLEANUP_INTERVAL", 3600)),  # 1 hour
+    "CLEANUP_INTERVAL": int(os.getenv("CLEANUP_INTERVAL", 86400)),  # Increased to 24 hours
     "QUALITY": int(os.getenv("QUALITY", 98)),
     "PRESERVE_RESOLUTION": True,
     "MIN_IMAGE_SIZE": 10000,  # Minimum file size in bytes to consider image valid
-    "GRADIO_TIMEOUT": int(os.getenv("GRADIO_TIMEOUT", 120)),  # Increased timeout for Gradio client
+    "GRADIO_TIMEOUT": int(os.getenv("GRADIO_TIMEOUT", 120)),  # Timeout for Gradio client
 }
 
 # Create directories and verify permissions
@@ -71,15 +71,20 @@ for folder in [CONFIG["STATIC_DIR"], CONFIG["UPLOAD_FOLDER"], CONFIG["OUTPUT_FOL
 class CORSStaticFiles(StaticFiles):
     async def get_response(self, path: str, scope):
         logger.debug(f"Serving static file: {path}")
-        response = await super().get_response(path, scope)
-        response.headers.update({
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "GET, OPTIONS",
-            "Access-Control-Allow-Headers": "*",
-            "Cache-Control": "public, max-age=3600",
-            "Content-Disposition": "inline"
-        })
-        return response
+        try:
+            response = await super().get_response(path, scope)
+            response.headers.update({
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "GET, OPTIONS",
+                "Access-Control-Allow-Headers": "*",
+                "Cache-Control": "public, max-age=3600",
+                "Content-Disposition": "inline"
+            })
+            logger.debug(f"Static file served successfully: {path}")
+            return response
+        except Exception as e:
+            logger.error(f"Failed to serve static file {path}: {str(e)}")
+            raise HTTPException(404, detail=f"Static file {path} not found")
 
 app.mount("/static", CORSStaticFiles(directory=CONFIG["STATIC_DIR"]), name="static")
 
@@ -149,8 +154,7 @@ def high_quality_preprocess(content: bytes) -> bytes:
             if img.mode != 'RGB':
                 img = img.convert('RGB')
             
-            # Optimize image size if too large
-            max_size = (1280, 1280)  # Reduced max resolution to optimize transfer
+            max_size = (1280, 1280)  # Optimize for transfer
             if not CONFIG["PRESERVE_RESOLUTION"]:
                 img.thumbnail(max_size, Image.Resampling.LANCZOS)
             
@@ -174,12 +178,11 @@ def high_quality_preprocess(content: bytes) -> bytes:
         return content
 
 async def high_quality_enhance(image_path: str) -> str:
+    client = None
     try:
-        # Initialize Gradio client for Tile-Upscaler
         logger.debug(f"Initializing Tile-Upscaler client for {image_path}")
         client = Client("gokaygokay/Tile-Upscaler", httpx_kwargs={"timeout": CONFIG["GRADIO_TIMEOUT"]})
         
-        # Perform enhancement
         result = client.predict(
             param_0=handle_file(image_path),
             param_1=512,
@@ -190,7 +193,6 @@ async def high_quality_enhance(image_path: str) -> str:
             api_name="/wrapper"
         )
         
-        # Assuming result contains a list of file paths, use the first one
         if not result or not isinstance(result, list) or not result:
             logger.error(f"No valid enhanced image returned for {image_path}")
             raise ValueError("No valid enhanced image returned")
@@ -200,15 +202,12 @@ async def high_quality_enhance(image_path: str) -> str:
             logger.error(f"Enhanced image file {enhanced_path} does not exist")
             raise ValueError(f"Enhanced image file {enhanced_path} does not exist")
         
-        # Create a new unique filename for the enhanced image
         unique_filename = f"enhanced_{uuid.uuid4().hex}.png"
         final_output_path = os.path.join(CONFIG["OUTPUT_FOLDER"], unique_filename)
         
-        # Copy enhanced image to final output path
         shutil.copy(enhanced_path, final_output_path)
         logger.debug(f"Enhanced image copied to {final_output_path}")
         
-        # Save as PNG with high quality
         with Image.open(final_output_path) as img:
             img = img.convert("RGB")
             img.save(
@@ -226,7 +225,7 @@ async def high_quality_enhance(image_path: str) -> str:
         logger.error(f"Image enhancement failed for {image_path}: {str(e)}")
         raise
     finally:
-        if 'client' in locals():
+        if client:
             try:
                 client.close()
                 logger.debug(f"Tile-Upscaler client closed for {image_path}")
@@ -251,6 +250,7 @@ async def face_swap(
     dest_face_idx: int = 1,
     task_id: str = None
 ) -> str:
+    client = None
     try:
         if not all([validate_image(source_image), validate_image(dest_image)]):
             raise ValueError("Invalid input files")
@@ -274,7 +274,7 @@ async def face_swap(
             
             result = client.predict(
                 sourceImage=handle_file(source_image),
-                sourceFaceIndex=1,  # Use the first face from source
+                sourceFaceIndex=1,
                 destinationImage=handle_file(dest_image),
                 destinationFaceIndex=dest_face_idx,
                 api_name="/predict"
@@ -326,7 +326,7 @@ async def face_swap(
         logger.error(f"Face swap failed: {str(e)} with files {source_image}, {dest_image}")
         raise
     finally:
-        if 'client' in locals():
+        if client:
             try:
                 client.close()
                 logger.debug(f"Gradio client closed for task {task_id}")
@@ -395,6 +395,7 @@ async def swap_faces(
                 logger.error(f"Cached file {result_url} does not exist")
                 raise HTTPException(500, detail=f"Cached file {result_url} does not exist")
             background_tasks.add_task(cleanup_output_folder)
+            logger.debug(f"Returning cached result URL: {result_url}")
             return JSONResponse({
                 "success": True,
                 "data": {"result_image": result_url, "task_id": task_id},
@@ -415,6 +416,7 @@ async def swap_faces(
             result = await face_swap(source_path, dest_path, task_id=task_id)
             cache[cache_key] = result
             logger.info(f"Cached high-quality result: {result}")
+            logger.debug(f"Returning result URL: /{result}")
 
             background_tasks.add_task(cleanup_output_folder)
 
@@ -517,8 +519,7 @@ async def shopify_face_swap(
         user_content = high_quality_preprocess(user_content)
         product_content = high_quality_preprocess(product_content)
 
-        # Determine destination face index based on product_image_url
-        dest_face_idx = 1  # Default to 1 for all other images
+        dest_face_idx = 1
         if "TEACHER.webp" in product_image_url:
             dest_face_idx = 3
         elif "REDKNIGHT.webp" in product_image_url:
@@ -534,6 +535,7 @@ async def shopify_face_swap(
                 logger.error(f"Cached file {result_url} does not exist")
                 raise HTTPException(500, detail=f"Cached file {result_url} does not exist")
             background_tasks.add_task(cleanup_output_folder)
+            logger.debug(f"Returning cached result URL: {result_url}")
             return JSONResponse({
                 "success": True,
                 "data": {"result_image": result_url, "task_id": task_id},
@@ -555,6 +557,7 @@ async def shopify_face_swap(
             result = await face_swap(user_path, product_path, dest_face_idx=dest_face_idx, task_id=task_id)
             cache[cache_key] = result
             logger.info(f"Cached high-quality result: {result}")
+            logger.debug(f"Returning result URL: /{result}")
 
             background_tasks.add_task(cleanup_output_folder)
 
