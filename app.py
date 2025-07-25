@@ -166,11 +166,11 @@ async def high_quality_enhance(image_path: str) -> str:
         )
         
         logger.debug(f"Gradio predict result: {result}")
-        if not result or not isinstance(result, list) or not result:
+        if not result or not isinstance(result, list) or len(result) < 2:
             logger.error(f"No valid enhanced image returned for {image_path}")
             raise ValueError("No valid enhanced image returned")
         
-        enhanced_path = result[0]
+        enhanced_path = result[1]  # Use second result for the desired image
         logger.info(f"Gradio returned enhanced path: {enhanced_path}")
         
         if enhanced_path.startswith(('http://', 'https://')):
