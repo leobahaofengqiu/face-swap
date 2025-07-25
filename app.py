@@ -466,7 +466,7 @@ async def shopify_face_swap(
     logger.info(f"Starting Shopify face swap task: {task_id}")
 
     temp_file_path = None
-    try Lega:
+    try:
         if not user_image.filename:
             logger.error("No user image provided")
             raise HTTPException(400, detail="User image is required")
