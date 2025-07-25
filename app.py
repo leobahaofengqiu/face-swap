@@ -51,7 +51,7 @@ CONFIG = {
     "QUALITY": int(os.getenv("QUALITY", 98)),
     "PRESERVE_RESOLUTION": True,
     "MIN_IMAGE_SIZE": 10000,  # Minimum file size in bytes
-    "GRADIO_TIMEOUT": int(os.getenv("GRADIO_TIMEOUT", 120)),  # Timeout for Gradio
+    "GRADIO_TIMEOUT": int(os.getenv("GRADIO_TIMEOUT", 120)),  # Timeout for Gradio client
 }
 
 # Create directories and verify permissions
@@ -77,7 +77,7 @@ class CORSStaticFiles(StaticFiles):
                 "Access-Control-Allow-Origin": "*",
                 "Access-Control-Allow-Methods": "GET, OPTIONS",
                 "Access-Control-Allow-Headers": "*",
-                "Cache-Control": "no-cache, no-store, must-revalidate",
+                "Cache-Control": "public, max-age=3600",
                 "Content-Disposition": "inline"
             })
             logger.debug(f"Static file served successfully: {path}")
@@ -103,8 +103,8 @@ def allowed_file(filename: str) -> bool:
 def validate_image(file_path: str) -> bool:
     try:
         with Image.open(file_path) as img:
-            img.verify()
-            img = Image.open(file_path)
+            img.verify()  # Verify image integrity
+            img = Image.open(file_path)  # Reopen to check format
             if img.format.lower() not in CONFIG["ALLOWED_EXTENSIONS"]:
                 logger.error(f"Image format {img.format} not in allowed extensions")
                 return False
@@ -154,7 +154,7 @@ def high_quality_preprocess(content: bytes) -> bytes:
             if img.mode != 'RGB':
                 img = img.convert('RGB')
             
-            max_size = (1280, 1280)
+            max_size = (1280, 1280)  # Optimize for transfer
             if not CONFIG["PRESERVE_RESOLUTION"]:
                 img.thumbnail(max_size, Image.Resampling.LANCZOS)
             
@@ -171,21 +171,18 @@ def high_quality_preprocess(content: bytes) -> bytes:
         
         os.unlink(temp_file_path)
         os.unlink(output_file.name)
-        logger.debug(f"Image preprocessing completed for {temp_file_path}")
+        logger.debug(f"Image preprocessing completed")
         return result
     except Exception as e:
         logger.error(f"Image preprocessing failed: {str(e)}")
         return content
 
-@retry(tries=3, delay=5, backoff=2, exceptions=(Exception,))
 async def high_quality_enhance(image_path: str) -> str:
     client = None
-    temp_download_path = None
     try:
         logger.debug(f"Initializing Tile-Upscaler client for {image_path}")
         client = Client("gokaygokay/Tile-Upscaler", httpx_kwargs={"timeout": CONFIG["GRADIO_TIMEOUT"]})
         
-        logger.debug(f"Sending image {image_path} to Tile-Upscaler")
         result = client.predict(
             param_0=handle_file(image_path),
             param_1=512,
@@ -196,43 +193,20 @@ async def high_quality_enhance(image_path: str) -> str:
             api_name="/wrapper"
         )
         
-        logger.debug(f"Gradio predict result: {result}")
         if not result or not isinstance(result, list) or not result:
             logger.error(f"No valid enhanced image returned for {image_path}")
             raise ValueError("No valid enhanced image returned")
         
-        enhanced_url = result[0]
-        logger.debug(f"Enhanced image URL from Gradio: {enhanced_url}")
+        enhanced_path = result[0]
+        if not os.path.exists(enhanced_path):
+            logger.error(f"Enhanced image file {enhanced_path} does not exist")
+            raise ValueError(f"Enhanced image file {enhanced_path} does not exist")
         
-        # Download the enhanced image from the Gradio URL
-        try:
-            response = requests.get(enhanced_url, timeout=30)
-            if response.status_code != 200:
-                logger.error(f"Failed to download enhanced image from {enhanced_url}: HTTP {response.status_code}")
-                raise ValueError(f"Failed to download enhanced image: HTTP {response.status_code}")
-            enhanced_content = response.content
-            logger.debug(f"Downloaded {len(enhanced_content)} bytes from {enhanced_url}")
-        except requests.RequestException as e:
-            logger.error(f"Failed to download enhanced image from {enhanced_url}: {str(e)}")
-            raise ValueError(f"Failed to download enhanced image: {str(e)}")
-        
-        # Save downloaded content to a temporary file
-        with tempfile.NamedTemporaryFile(suffix=".webp", delete=False) as temp_file:
-            temp_file.write(enhanced_content)
-            temp_download_path = temp_file.name
-        logger.debug(f"Saved downloaded image to temporary file: {temp_download_path}")
-        
-        # Validate the downloaded image
-        if not validate_image(temp_download_path):
-            logger.error(f"Downloaded image validation failed: {temp_download_path}")
-            raise ValueError(f"Downloaded image is invalid: {temp_download_path}")
-        
-        # Create final output path
         unique_filename = f"enhanced_{uuid.uuid4().hex}.png"
         final_output_path = os.path.join(CONFIG["OUTPUT_FOLDER"], unique_filename)
         
-        # Convert and save as PNG
-        with Image.open(temp_download_path) as img:
+        # Convert Gradio output (webp) to PNG
+        with Image.open(enhanced_path) as img:
             img = img.convert("RGB")
             img.save(
                 final_output_path,
@@ -241,12 +215,12 @@ async def high_quality_enhance(image_path: str) -> str:
                 optimize=True,
                 progressive=True
             )
-        logger.debug(f"Converted and saved enhanced image to {final_output_path}")
+        logger.debug(f"Enhanced image saved to {final_output_path}")
         
-        # Validate final output
-        if not os.path.exists(final_output_path) or not validate_image(final_output_path):
-            logger.error(f"Final enhanced image not created or invalid: {final_output_path}")
-            raise ValueError(f"Final enhanced image not created or invalid: {final_output_path}")
+        # Verify the saved file
+        if not os.path.exists(final_output_path):
+            logger.error(f"Failed to save enhanced image to {final_output_path}")
+            raise ValueError(f"Failed to save enhanced image to {final_output_path}")
         
         logger.info(f"Image enhancement completed for {final_output_path}")
         return final_output_path
@@ -255,12 +229,6 @@ async def high_quality_enhance(image_path: str) -> str:
         logger.error(f"Image enhancement failed for {image_path}: {str(e)}")
         raise
     finally:
-        if temp_download_path and os.path.exists(temp_download_path):
-            try:
-                os.unlink(temp_download_path)
-                logger.debug(f"Cleaned up temporary download file: {temp_download_path}")
-            except Exception as e:
-                logger.warning(f"Failed to clean up temporary download file {temp_download_path}: {str(e)}")
         if client:
             try:
                 client.close()
@@ -289,9 +257,7 @@ async def face_swap(
     client = None
     temp_output_path = None
     try:
-        logger.debug(f"Validating input images: {source_image}, {dest_image}")
         if not all([validate_image(source_image), validate_image(dest_image)]):
-            logger.error(f"Invalid input files: {source_image}, {dest_image}")
             raise ValueError("Invalid input files")
 
         progress_tracker[task_id] = "Initializing face swap"
@@ -318,7 +284,6 @@ async def face_swap(
                 destinationFaceIndex=dest_face_idx,
                 api_name="/predict"
             )
-            logger.debug(f"Face swap predict result: {result}")
 
             if result and os.path.exists(result) and validate_image(result):
                 with Image.open(result) as img:
@@ -362,9 +327,8 @@ async def face_swap(
         if temp_output_path and os.path.exists(temp_output_path):
             try:
                 os.unlink(temp_output_path)
-                logger.debug(f"Cleaned up temporary output file: {temp_output_path}")
-            except Exception as e:
-                logger.warning(f"Failed to clean up temporary output file {temp_output_path}: {str(e)}")
+            except FileNotFoundError:
+                logger.warning(f"Temporary file {temp_output_path} already deleted")
         if client:
             try:
                 client.close()
@@ -404,18 +368,16 @@ async def swap_faces(
     logger.info(f"Starting high-quality face swap task: {task_id}")
 
     try:
-        logger.debug(f"Received images: source={source_image.filename}, dest={dest_image.filename}")
         if not (source_image.filename and dest_image.filename):
             logger.error("No file selected")
             raise HTTPException(400, detail="No file selected")
         
         if not (allowed_file(source_image.filename) and allowed_file(dest_image.filename)):
             logger.error(f"Invalid file format: {source_image.filename}, {dest_image.filename}")
-            raise HTTPException(400, detail="Invalid file format. Only PNG, JPG, JPEG allowed")
+            raise HTTPException(400, detail="Invalid file format. Only PNG, JPG, JPEG, WEBP allowed")
 
         source_content = await source_image.read()
         dest_content = await dest_image.read()
-        logger.debug(f"Read source image size: {len(source_content)} bytes, dest image size: {len(dest_content)} bytes")
         if len(source_content) > CONFIG["MAX_FILE_SIZE"] or len(dest_content) > CONFIG["MAX_FILE_SIZE"]:
             logger.error(f"File size exceeds limit: {len(source_content)} or {len(dest_content)}")
             raise HTTPException(
@@ -426,35 +388,26 @@ async def swap_faces(
         progress_tracker[task_id] = "Preprocessing images for high quality"
         source_content = high_quality_preprocess(source_content)
         dest_content = high_quality_preprocess(dest_content)
-        logger.debug(f"Preprocessed images: source={len(source_content)} bytes, dest={len(dest_content)} bytes")
 
         cache_key = f"{get_file_hash(source_content)}:{get_file_hash(dest_content)}"
-        logger.debug(f"Cache key: {cache_key}")
 
         if cache_key in cache:
-            result = cache[cache_key]
-            result_url = f"/{result}?t={time.time()}"
-            logger.info Doch result_image_url: {result_url}")
-            if not os.path.exists(result.lstrip("/")):
-                logger.error(f"Cached file {result} not found")
-                raise HTTPException(500, detail=f"Cached file {result} not found")
+            result_url = f"/{cache[cache_key]}"
+            logger.info(f"Cache hit: {result_url}")
+            if not os.path.exists(result_url.lstrip("/")):
+                logger.error(f"Cached file {result_url} does not exist")
+                raise HTTPException(500, detail=f"Cached file {result_url} does not exist")
             background_tasks.add_task(cleanup_output_folder)
-            logger.debug(f"Returning cached result: {result_url}")
-            return JSONResponse(
-                {
-                    "success": True,
-                    "data": {"result_image": result_url, "task_id": task_id},
-                    "error": None
-                },
-                headers={
-                    "X-Process-Time": f"{time.time() - start_time:.2f}",
-                    "Cache-Control": "no-cache, no-store, must-revalidate"
-                }
-            )
+            logger.debug(f"Returning cached result URL: {result_url}")
+            return JSONResponse({
+                "success": True,
+                "data": {"result_image": result_url, "task_id": task_id},
+                "error": None
+            }, headers={"X-Process-Time": f"{time.time() - start_time:.2f}"})
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            source_filename = f"image_{uuid.uuid4().hex}.{source_image.filename.rsplit('.')[-1]}" 
-            dest_filename = f"image_{uuid.uuid4().hex}.{dest_image.filename.rsplit('.')[-1]}" 
+            source_filename = f"source_{uuid.uuid4().hex}.{source_image.filename.rsplit('.', 1)[1]}"
+            dest_filename = f"dest_{uuid.uuid4().hex}.{dest_image.filename.rsplit('.', 1)[1]}"
             source_path = os.path.join(temp_dir, source_filename)
             dest_path = os.path.join(temp_dir, dest_filename)
 
@@ -462,55 +415,44 @@ async def swap_faces(
                 f.write(source_content)
             with open(dest_path, "wb") as f:
                 f.write(dest_content)
-            logger.debug(f"Saved temporary files: source={source_path}, dest={dest_path}")
 
             result = await face_swap(source_path, dest_path, task_id=task_id)
             cache[cache_key] = result
-            result_url = f"/{result}?t={time.time()}"
             logger.info(f"Cached high-quality result: {result}")
-            logger.debug(f"Returning result URL: {result_url}")
+            logger.debug(f"Returning result URL: /{result}")
 
             background_tasks.add_task(cleanup_output_folder)
 
-            return JSONResponse(
-                {
-                    "success": True,
-                    "data": {"result_image": result_url, "task_id": task_id},
-                    "headers": {
-                        "X-Process-Time": f"{time.time() - start_time:.2f}",
-                        "Cache-Control": "no-cache, no-store, must-revalidate"
-                    }
-                )
+            return JSONResponse({
+                "success": True,
+                "data": {"result_image": f"/{result}", "task_id": task_id},
+                "error": None
+            }, headers={"X-Process-Time": f"{time.time() - start_time:.2f}"})
 
     except HTTPException as e:
         logger.error(f"Face swap error: {str(e)}")
         progress_tracker[task_id] = f"Error: {str(e)}"
-        raise
+        return JSONResponse(
+            status_code=e.status_code,
+            content={"success": False, "data": None, "error": str(e.detail)},
+            headers={"Access-Control-Allow-Origin": "*"}
+        )
     except Exception as e:
-        logger.error(f"Face swap failed: {str(e)}")
+        logger.error(f"Face swap error: {str(e)}")
         progress_tracker[task_id] = f"Error: {str(e)}"
         return JSONResponse(
             status_code=500,
             content={"success": False, "data": None, "error": str(e)},
-            headers={"Access-Control": "no-cache, no-store, must-revalidate"}
+            headers={"Access-Control-Allow-Origin": "*"}
         )
 
 @app.get("/progress/{task_id}", description="Check progress of face swap task")
 async def get_progress(task_id: str):
-    try:
-        status = progress_tracker.get(task_id, "Unknown task")
-        logger.debug(f"Progress check for task {task_id}: {status}")
-        return JSONResponse(
-            content={"task_id": task_id, "status": status},
-            headers={"Cache-Control": "no-cache, no-store, must-revalidate"}
-        )
-    except Exception as e:
-        logger.error(f"Progress check failed for {task_id}: {str(e)}")
-        return JSONResponse(
-            {"task_id": task_id, "error": str(e)},
-            status_code=500,
-            headers={"Cache-Control": "no-cache, no-store, must-revalidate"}
-        )
+    status = progress_tracker.get(task_id, "Unknown task")
+    return JSONResponse(
+        content={"task_id": task_id, "status": status},
+        headers={"Access-Control-Allow-Origin": "*"}
+    )
 
 @app.post("/shopify-face-swap", description="Upload user face and product image URL for Shopify preview")
 async def shopify_face_swap(
@@ -524,174 +466,133 @@ async def shopify_face_swap(
     logger.info(f"Starting Shopify face swap task: {task_id}")
 
     temp_file_path = None
-    try:
-        logger.debug(f"Processing Shopify request: user_image={user_image.filename}, product_image_url={product_image_url}")
+    try Lega:
         if not user_image.filename:
             logger.error("No user image provided")
-            raise HTTPException(status_code=400, detail="User image is required")
+            raise HTTPException(400, detail="User image is required")
         if not product_image_url:
             logger.error("No product image URL provided")
-            raise HTTPException(status_code=400, detail="Product image URL is required")
+            raise HTTPException(400, detail="Product image URL is required")
         if not product_image_url.startswith(('http://', 'https://')):
             logger.error(f"Invalid product image URL: {product_image_url}")
-            raise HTTPException(
-                status_code=400,
-                detail="Invalid product image URL: Must start with http:// or https://"
-            )
+            raise HTTPException(400, detail="Invalid product image URL: Must start with http:// or https://")
 
         user_content = await user_image.read()
-        logger.debug(f"Read user image: {len(user_content)} bytes")
         if len(user_content) > CONFIG["MAX_FILE_SIZE"]:
             logger.error(f"User image size {len(user_content)} exceeds {CONFIG['MAX_FILE_SIZE']}")
             raise HTTPException(
-                status_code=400,
+                400,
                 detail=f"User image size exceeds {CONFIG['MAX_FILE_SIZE'] / (1024 * 1024)}MB"
             )
         if not allowed_file(user_image.filename):
             logger.error(f"Invalid user image format: {user_image.filename}")
-            raise HTTPException(
-                status_code=400,
-                detail="Invalid user image format: Only PNG, JPG, JPEG allowed"
-            )
+            raise HTTPException(400, detail="Invalid user image format. Only PNG, JPG, JPEG, WEBP allowed")
 
         progress_tracker[task_id] = "Downloading product image"
         try:
             response = requests.get(product_image_url, timeout=10)
-            if response.status_code) != 200:
+            if response.status_code != 200:
                 logger.error(f"Failed to download product image: HTTP {response.status_code}")
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Failed to download product image: HTTP {response.status_code}"
-                )
+                raise HTTPException(400, detail=f"Failed to download product image: HTTP {response.status_code}")
             product_content = response.content
             content_type = response.headers.get("content-type", "")
             logger.info(f"Product image content-type: {content_type}")
             if not content_type.startswith("image/"):
                 logger.error(f"Product image is not an image: Content-Type {content_type}")
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Product image is not an image: Content-Type {content_type}"
-                )
+                raise HTTPException(400, detail=f"Product image is not an image: Content-Type {content_type}")
         except requests.RequestException as e:
-            logger.error(f"Failed to download product image: {str(e)}")
-            raise HTTPException(
-                status_code=400,
-                detail=f"Failed to download product image: {error(e)}"
-            )
+            logger.error(f"Product image download failed: {str(e)}")
+            raise HTTPException(400, detail=f"Failed to download product image: {str(e)}")
 
         if len(product_content) > CONFIG["MAX_FILE_SIZE"]:
-            logger.error(f"File image size {len(product_content)} exceeds {CONFIG['MAX_FILE_SIZE']}")
+            logger.error(f"Product image size {len(product_content)} exceeds {CONFIG['MAX_FILE_SIZE']}")
             raise HTTPException(
-                status_code=400,
-                detail=f"File image size exceeds {CONFIG['MAX_FILE_SIZE'] / (1024 * 1024)}MB"
+                400,
+                detail=f"Product image size exceeds {CONFIG['MAX_FILE_SIZE'] / (1024 * 1024)}MB"
             )
 
-        with Tempfile.NamedTemporaryFile(
-            suffix=".tmp",
-            delete=False
-        ) as temp_file:
+        with tempfile.NamedTemporaryFile(suffix=".tmp", delete=False) as temp_file:
             temp_file.write(product_content)
             temp_file_path = temp_file.name
-        logger.debug(f"Saved temporary product image to: {temp_file_path}")
         if not validate_image(temp_file_path):
             logger.error(f"Invalid product image format: {product_image_url}")
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid product image format: {product_image_url}"
-            )
+            raise HTTPException(400, detail=f"Invalid product image format: {product_image_url}")
 
         progress_tracker[task_id] = "Preprocessing images for high quality"
-        user_content = thigh_quality_preprocess(user_content)
-        product_content = thigh_quality_preprocess(product_content)
-        logger.debug(f"Preprocessed images: user={len(user_content)} bytes, product={len(product_content)} bytes")
+        user_content = high_quality_preprocess(user_content)
+        product_content = high_quality_preprocess(product_content)
 
         dest_face_idx = 1
-        if "TEACHER.webp" in product_image_url.lower():
+        if "TEACHER.webp" in product_image_url:
             dest_face_idx = 3
-        elif "filename" in filename.lower() for filename in ["REDKNIGHT.webp"]:
+        elif "REDKNIGHT.webp" in product_image_url:
             dest_face_idx = 4
-        elif any(filename in product_image_url.lower() for filename in [
-            "DOCTOR.webp", "BOYCHEF1FINAL.webp", "police_investigator.webp",
-            "CULINARY_GIRL.png", "fsoccer.png"
-        ]):
+        elif any(filename in product_image_url for filename in ["DOCTOR.webp", "BOYCHEF1FINAL.webp", "police_investigator.webp", "CULINARY_GIRL.png", "fsoccer.webp"]):
             dest_face_idx = 2
-        logger.debug(f"Selected destination face index: {dest_face_idx}")
 
         cache_key = f"{get_file_hash(user_content)}:{get_file_hash(product_content)}:{dest_face_idx}"
-        logger.debug(f"Cache key: {cache_key}")
         if cache_key in cache:
-            result = f"/{cache[cache_key]}"
-            result_url = f"{result}?t={time.time()}"
+            result_url = f"/{cache[cache_key]}"
             logger.info(f"Cache hit: {result_url}")
-            if not os.path.exists(result.lstrip("/")).:
-                logger.error(f"Cached file {result} not found")
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Failed to load cached file {result}"
-                )
+            if not os.path.exists(result_url.lstrip("/")):
+                logger.error(f"Cached file {result_url} does not exist")
+                raise HTTPException(500, detail=f"Cached file {result_url} does not exist")
             background_tasks.add_task(cleanup_output_folder)
-            logger.debug(f"Returning cached result: {result_url}")
-            return JSONResponse(
-                {
-                    "success": True,
-                    "data": {"result_image": result_url, "data": {"task_id": task_id},
-                    "error": None
-                },
-                headers={
-                    "X-Process-Time-Time-Time": f"{time.time() - start_time:.2f}",
-                    "Cache-Control": {"no-cache, no-cache, no-store, no-store, must-revalidate"
-                }
-            )
+            logger.debug(f"Returning cached result URL: {result_url}")
+            return JSONResponse({
+                "success": True,
+                "data": {"result_image": result_url, "task_id": task_id},
+                "error": None
+            }, headers={"X-Process-Time": f"{time.time() - start_time:.2f}"})
 
-        with Tempfile.TemporaryDirectory() as temp_dir:
-            user_filename = f"user_image_{uuid.uuid4().hex}.{user_image.filename.rsplit('.')[-1]}" 
+        with tempfile.TemporaryDirectory() as temp_dir:
+            user_filename = f"user_{uuid.uuid4().hex}.{user_image.filename.rsplit('.', 1)[1]}"
             product_ext = get_image_extension(product_content)
-            product_filename = f"product_image_{uuid_image_uuid4().hex()}.{product_ext}"
+            product_filename = f"product_{uuid.uuid4().hex}.{product_ext}"
             user_path = os.path.join(temp_dir, user_filename)
             product_path = os.path.join(temp_dir, product_filename)
 
             with open(user_path, "wb") as f:
                 f.write(user_content)
-            with open(product_path, "wb") as product_file:
-                product_path.write(product_content)
-            logger.debug(f"Saved temporary files: user={user_filename}, product={product_filename}")
+            with open(product_path, "wb") as f:
+                f.write(product_content)
 
             result = await face_swap(user_path, product_path, dest_face_idx=dest_face_idx, task_id=task_id)
             cache[cache_key] = result
-            result_url = f"/{result}?t={time.time()}"
-            logger.info(f"Successfully processed and cached result: {result}")
-            logger.debug(f"Returning processed result: {result_url}")
+            logger.info(f"Cached high-quality result: {result}")
+            logger.debug(f"Returning result URL: /{result}")
 
             background_tasks.add_task(cleanup_output_folder)
 
-            return JSONResponse(
-                {
-                    "success": True,
-                    "data": {"result_image": result_url, "task_id": task_id},
-                    "error": None
-                },
-                headers={
-                    "X-Process-Time-Time": f"{time.time() - start_time:.2f}",
-                    "Cache-Control": "no-cache, no-cache, no-store, must-revalidate"
-                }
-            )
+            return JSONResponse({
+                "success": True,
+                "data": {"result_image": f"/{result}", "task_id": task_id},
+                "error": None
+            }, headers={"X-Process-Time": f"{time.time() - start_time:.2f}"})
 
-        except HTTPException as e:
-            logger.error(f"Shopify face swap error": {str(e)}")
-            progress_tracker[task_id] = f"Error: {str(e)}"
-            raise
-        except Exception as e:
-            logger.error(f"Shopify face swap error": {str(e)}")
-            progress_tracker[task_id] = f"Error: {error(e)}"
-            return JSONResponse(
-                status_code=500,
-                content={"success": False, "data": "None, "error": str(e)},
-                headers={"Cache-Control": {"no-cache":", no-cache, no-store, must-revalidate"}}
-
-        finally:
-            if temp_file_path and os.path.exists(temp_file_path)):
-                try:
-                    os.unlink(temp_file_path)
-                    logger.debug(f"Cleaned up temporary product file: {temp_file_path}")
-                except Exception as e:
-                    logger.warning(f"Failed to clean up temporary product file {temp_file_path}: {error(e)}")
+    except HTTPException as e:
+        logger.error(f"Shopify face swap error: {str(e)}")
+        progress_tracker[task_id] = f"Error: {str(e)}"
+        if temp_file_path and os.path.exists(temp_file_path):
+            try:
+                os.unlink(temp_file_path)
+            except FileNotFoundError:
+                logger.warning(f"Temporary file {temp_file_path} already deleted")
+        return JSONResponse(
+            status_code=e.status_code,
+            content={"success": False, "data": None, "error": str(e.detail)},
+            headers={"Access-Control-Allow-Origin": "*"}
+        )
+    except Exception as e:
+        logger.error(f"Shopify face swap error: {str(e)}")
+        progress_tracker[task_id] = f"Error: {str(e)}"
+        if temp_file_path and os.path.exists(temp_file_path):
+            try:
+                os.unlink(temp_file_path)
+            except FileNotFoundError:
+                logger.warning(f"Temporary file {temp_file_path} already deleted")
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "data": None, "error": str(e)},
+            headers={"Access-Control-Allow-Origin": "*"}
+        )
