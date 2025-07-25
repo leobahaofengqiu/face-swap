@@ -175,7 +175,7 @@ def high_quality_preprocess(content: bytes) -> bytes:
         logger.error(f"Image preprocessing failed: {str(e)}")
         return content
 
-async def high_quality_enhance(image_path: str) -> None:
+async def high_quality_enhance(image_path: str) -> str:
     try:
         # Initialize Gradio client for Tile-Upscaler
         logger.debug(f"Initializing Tile-Upscaler client for {image_path}")
@@ -202,21 +202,27 @@ async def high_quality_enhance(image_path: str) -> None:
             logger.error(f"Enhanced image file {enhanced_path} does not exist")
             raise ValueError(f"Enhanced image file {enhanced_path} does not exist")
         
-        # Copy enhanced image to original path
-        shutil.copy(enhanced_path, image_path)
-        logger.debug(f"Enhanced image copied to {image_path}")
+        # Create a new unique filename for the enhanced image
+        unique_filename = f"enhanced_{uuid.uuid4().hex}.png"
+        final_output_path = os.path.join(CONFIG["OUTPUT_FOLDER"], unique_filename)
+        
+        # Copy enhanced image to final output path
+        shutil.copy(enhanced_path, final_output_path)
+        logger.debug(f"Enhanced image copied to {final_output_path}")
         
         # Save as PNG with high quality
-        with Image.open(image_path) as img:
+        with Image.open(final_output_path) as img:
             img = img.convert("RGB")
             img.save(
-                image_path,
+                final_output_path,
                 "PNG",
                 quality=CONFIG["QUALITY"],
                 optimize=True,
                 progressive=True
             )
-        logger.info(f"Image enhancement completed for {image_path}")
+        logger.info(f"Image enhancement completed for {final_output_path}")
+        
+        return final_output_path
         
     except Exception as e:
         logger.error(f"Image enhancement failed for {image_path}: {str(e)}")
@@ -294,7 +300,7 @@ async def face_swap(
                 progress_tracker[task_id] = f"Face swap attempt with destination face number {dest_face_idx} failed"
                 if os.path.exists(temp_output_path):
                     os.unlink(temp_output_path)
-                raise ValueError(f"Face swap failed for destination face index {dest_face_idx}")
+                raise ValueValueError(f"Face swap failed for destination face index {dest_face_idx}")
         except Exception as e:
             logger.warning(f"Face swap attempt with destination face number {dest_face_idx} failed: {str(e)}")
             progress_tracker[task_id] = f"Face swap attempt with destination face number {dest_face_idx} failed: {str(e)}"
@@ -302,32 +308,20 @@ async def face_swap(
                 os.unlink(temp_output_path)
             raise
 
-        unique_filename = f"face_swap_{uuid.uuid4().hex}.png"
-        output_path = os.path.join(CONFIG["OUTPUT_FOLDER"], unique_filename)
-        
         progress_tracker[task_id] = "Applying high-quality enhancements"
-        logger.debug(f"Saving face swap result (face number {dest_face_idx}, size {width}x{height}) to {output_path}")
-        with Image.open(temp_output_path) as img:
-            img = img.convert("RGB")
-            img.save(
-                output_path,
-                "PNG",
-                quality=CONFIG["QUALITY"],
-                optimize=True,
-                progressive=True
-            )
-        await high_quality_enhance(output_path)
+        logger.debug(f"Enhancing face swap result (face number {dest_face_idx}, size {width}x{height})")
+        enhanced_output_path = await high_quality_enhance(temp_output_path)
         
         if os.path.exists(temp_output_path):
             os.unlink(temp_output_path)
         
-        if not os.path.exists(output_path):
-            logger.error(f"Output file {output_path} was not created")
-            raise ValueError(f"Output file {output_path} was not created")
+        if not os.path.exists(enhanced_output_path):
+            logger.error(f"Enhanced output file {enhanced_output_path} was not created")
+            raise ValueError(f"Enhanced output file {enhanced_output_path} was not created")
 
         logger.info(f"Completed face swap with face at number {dest_face_idx} (size: {width}x{height}, {size} pixels)")
         progress_tracker[task_id] = f"Completed with face at number {dest_face_idx} (size: {width}x{height}, {size} pixels)"
-        return output_path
+        return enhanced_output_path
 
     except Exception as e:
         progress_tracker[task_id] = f"Error: {str(e)}"
