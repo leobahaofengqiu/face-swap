@@ -117,6 +117,26 @@ def validate_image(file_path: str) -> bool:
         logger.error(f"Image validation failed for {file_path}: {str(e)}")
         return False
 
+def validate_image_url(url: str) -> bool:
+    try:
+        response = requests.head(url, timeout=5)
+        if response.status_code != 200:
+            logger.error(f"Image URL not accessible: {url} (HTTP {response.status_code})")
+            return False
+        content_type = response.headers.get("content-type", "")
+        if not content_type.startswith("image/"):
+            logger.error(f"URL does not point to an image: {url} (Content-Type: {content_type})")
+            return False
+        content_length = int(response.headers.get("content-length", 0))
+        if content_length < CONFIG["MIN_IMAGE_SIZE"]:
+            logger.error(f"Image at URL {url} is too small ({content_length} bytes)")
+            return False
+        logger.debug(f"Image URL validated successfully: {url}")
+        return True
+    except requests.RequestException as e:
+        logger.error(f"Failed to validate image URL {url}: {str(e)}")
+        return False
+
 def get_image_size(image_path: str) -> Tuple[int, int, int]:
     try:
         with Image.open(image_path) as img:
@@ -179,8 +199,8 @@ def high_quality_preprocess(content: bytes) -> bytes:
 
 async def high_quality_enhance(image_path: str) -> str:
     client = None
-    temp_enhanced_path = None
     try:
+        logger.info(f"Starting enhancement for {image_path}")
         logger.debug(f"Initializing Tile-Upscaler client for {image_path}")
         client = Client("gokaygokay/Tile-Upscaler", httpx_kwargs={"timeout": CONFIG["GRADIO_TIMEOUT"]})
         
@@ -195,63 +215,33 @@ async def high_quality_enhance(image_path: str) -> str:
             api_name="/wrapper"
         )
         
+        logger.debug(f"Gradio predict result: {result}")
         if not result or not isinstance(result, list) or not result:
             logger.error(f"No valid enhanced image returned for {image_path}")
             raise ValueError("No valid enhanced image returned")
         
         enhanced_path = result[0]
-        logger.debug(f"Gradio returned enhanced path: {enhanced_path}")
-        if not os.path.exists(enhanced_path):
-            logger.error(f"Enhanced image file {enhanced_path} does not exist")
-            raise ValueError(f"Enhanced image file {enhanced_path} does not exist")
+        logger.info(f"Gradio returned enhanced path: {enhanced_path}")
         
-        unique_filename = f"enhanced_{uuid.uuid4().hex}.png"
-        final_output_path = os.path.join(CONFIG["OUTPUT_FOLDER"], unique_filename)
+        # Check if enhanced_path is a URL or local file
+        if enhanced_path.startswith(('http://', 'https://')):
+            gradio_url = enhanced_path
+        else:
+            # Assume it's a Gradio temporary file path (e.g., /tmp/gradio/.../image.webp)
+            gradio_url = f"https://gokaygokay-tile-upscaler.hf.space/file={enhanced_path}"
         
-        # Convert Gradio output (webp) to PNG with retry
-        for attempt in range(3):
-            try:
-                with Image.open(enhanced_path) as img:
-                    img = img.convert("RGB")
-                    img.save(
-                        final_output_path,
-                        "PNG",
-                        quality=CONFIG["QUALITY"],
-                        optimize=True,
-                        progressive=True
-                    )
-                break
-            except Exception as e:
-                logger.warning(f"Attempt {attempt + 1} failed to save enhanced image: {str(e)}")
-                if attempt == 2:
-                    logger.error(f"Failed to save enhanced image after 3 attempts: {str(e)}")
-                    raise ValueError(f"Failed to save enhanced image to {final_output_path}: {str(e)}")
-                time.sleep(1)  # Wait before retrying
+        # Validate the URL
+        if not validate_image_url(gradio_url):
+            logger.error(f"Invalid or inaccessible Gradio image URL: {gradio_url}")
+            raise ValueError(f"Invalid or inaccessible Gradio image URL: {gradio_url}")
         
-        # Verify the saved file
-        if not os.path.exists(final_output_path):
-            logger.error(f"Enhanced image file {final_output_path} was not created")
-            raise ValueError(f"Enhanced image file {final_output_path} was not created")
-        
-        # Check file size to ensure it's not empty
-        file_size = os.path.getsize(final_output_path)
-        if file_size < CONFIG["MIN_IMAGE_SIZE"]:
-            logger.error(f"Enhanced image {final_output_path} is too small ({file_size} bytes)")
-            raise ValueError(f"Enhanced image {final_output_path} is too small ({file_size} bytes)")
-        
-        logger.info(f"Image enhancement completed for {final_output_path} (size: {file_size} bytes)")
-        return final_output_path
+        logger.info(f"Returning Gradio enhanced image URL: {gradio_url}")
+        return gradio_url
         
     except Exception as e:
         logger.error(f"Image enhancement failed for {image_path}: {str(e)}")
         raise
     finally:
-        if temp_enhanced_path and os.path.exists(temp_enhanced_path):
-            try:
-                os.unlink(temp_enhanced_path)
-                logger.debug(f"Cleaned up temporary enhanced file: {temp_enhanced_path}")
-            except FileNotFoundError:
-                logger.warning(f"Temporary enhanced file {temp_enhanced_path} already deleted")
         if client:
             try:
                 client.close()
@@ -280,19 +270,22 @@ async def face_swap(
     client = None
     temp_output_path = None
     try:
+        logger.info(f"Starting face swap for task {task_id} with source: {source_image}, dest: {dest_image}")
         if not all([validate_image(source_image), validate_image(dest_image)]):
+            logger.error(f"Invalid input files: {source_image}, {dest_image}")
             raise ValueError("Invalid input files")
 
         progress_tracker[task_id] = "Initializing face swap"
         logger.debug(f"Initializing Gradio client for task {task_id}")
         try:
             client = Client("Dentro/face-swap", httpx_kwargs={"timeout": CONFIG["GRADIO_TIMEOUT"]})
+            logger.debug(f"Gradio client initialized for task {task_id}")
         except Exception as e:
             logger.error(f"Failed to initialize Gradio client: {str(e)}")
             raise HTTPException(500, detail=f"Gradio client initialization failed: {str(e)}")
 
         progress_tracker[task_id] = "Detecting faces and processing swap"
-        logger.debug(f"Starting face swap with source: {source_image}, dest: {dest_image}, dest_face_idx: {dest_face_idx}")
+        logger.debug(f"Starting face swap with dest_face_idx: {dest_face_idx}")
 
         logger.info(f"Trying face swap with destination face number {dest_face_idx}")
         progress_tracker[task_id] = f"Trying face swap with destination face number {dest_face_idx}"
@@ -308,6 +301,7 @@ async def face_swap(
                 api_name="/predict"
             )
 
+            logger.info(f"Gradio face swap returned: {result}")
             if result and os.path.exists(result) and validate_image(result):
                 with Image.open(result) as img:
                     img = img.convert("RGB")
@@ -319,32 +313,28 @@ async def face_swap(
                         progressive=True
                     )
                 size, width, height = get_image_size(temp_output_path)
-                logger.info(f"Face swap with destination face number {dest_face_idx} succeeded, size: {width}x{height} ({size} pixels)")
-                progress_tracker[task_id] = f"Face swap with destination face number {dest_face_idx} succeeded, size: {width}x{height} ({size} pixels)"
+                logger.info(f"Face swap succeeded, size: {width}x{height} ({size} pixels)")
+                progress_tracker[task_id] = f"Face swap succeeded, size: {width}x{height} ({size} pixels)"
             else:
-                logger.warning(f"Face swap attempt with destination face number {dest_face_idx} failed or produced invalid result")
-                progress_tracker[task_id] = f"Face swap attempt with destination face number {dest_face_idx} failed"
+                logger.error(f"Face swap failed or produced invalid result: {result}")
+                progress_tracker[task_id] = f"Face swap failed"
                 raise ValueError(f"Face swap failed for destination face index {dest_face_idx}")
         except Exception as e:
-            logger.warning(f"Face swap attempt with destination face number {dest_face_idx} failed: {str(e)}")
-            progress_tracker[task_id] = f"Face swap attempt with destination face number {dest_face_idx} failed: {str(e)}"
+            logger.error(f"Face swap attempt failed: {str(e)}")
+            progress_tracker[task_id] = f"Face swap failed: {str(e)}"
             raise
 
         progress_tracker[task_id] = "Applying high-quality enhancements"
-        logger.debug(f"Enhancing face swap result (face number {dest_face_idx}, size {width}x{height})")
-        enhanced_output_path = await high_quality_enhance(temp_output_path)
+        logger.debug(f"Enhancing face swap result")
+        enhanced_output_url = await high_quality_enhance(temp_output_path)
         
-        if not os.path.exists(enhanced_output_path):
-            logger.error(f"Enhanced output file {enhanced_output_path} was not created")
-            raise ValueError(f"Enhanced output file {enhanced_output_path} was not created")
-
-        logger.info(f"Completed face swap with face at number {dest_face_idx} (size: {width}x{height}, {size} pixels)")
-        progress_tracker[task_id] = f"Completed with face at number {dest_face_idx} (size: {width}x{height}, {size} pixels)"
-        return enhanced_output_path
+        logger.info(f"Completed face swap (URL: {enhanced_output_url})")
+        progress_tracker[task_id] = f"Completed face swap (URL: {enhanced_output_url})"
+        return enhanced_output_url
 
     except Exception as e:
         progress_tracker[task_id] = f"Error: {str(e)}"
-        logger.error(f"Face swap failed: {str(e)} with files {source_image}, {dest_image}")
+        logger.error(f"Face swap failed: {str(e)}")
         raise
     finally:
         if temp_output_path and os.path.exists(temp_output_path):
@@ -417,11 +407,8 @@ async def swap_faces(
 
         # Temporarily disable cache for debugging
         # if cache_key in cache:
-        #     result_url = f"/{cache[cache_key]}"
+        #     result_url = cache[cache_key]
         #     logger.info(f"Cache hit: {result_url}")
-        #     if not os.path.exists(result_url.lstrip("/")):
-        #         logger.error(f"Cached file {result_url} does not exist")
-        #         raise HTTPException(500, detail=f"Cached file {result_url} does not exist")
         #     background_tasks.add_task(cleanup_output_folder)
         #     logger.debug(f"Returning cached result URL: {result_url}")
         #     return JSONResponse({
@@ -441,21 +428,16 @@ async def swap_faces(
             with open(dest_path, "wb") as f:
                 f.write(dest_content)
 
-            result = await face_swap(source_path, dest_path, task_id=task_id)
-            cache[cache_key] = result
-            logger.info(f"Cached high-quality result: {result}")
-            logger.debug(f"Returning result URL: /{result}")
-
-            # Verify result file exists before returning
-            if not os.path.exists(result.lstrip("/")):
-                logger.error(f"Result file {result} does not exist")
-                raise HTTPException(500, detail=f"Result file {result} does not exist")
+            result_url = await face_swap(source_path, dest_path, task_id=task_id)
+            cache[cache_key] = result_url
+            logger.info(f"Cached high-quality result: {result_url}")
+            logger.debug(f"Returning result URL: {result_url}")
 
             background_tasks.add_task(cleanup_output_folder)
 
             return JSONResponse({
                 "success": True,
-                "data": {"result_image": f"/{result}", "task_id": task_id},
+                "data": {"result_image": result_url, "task_id": task_id},
                 "error": None
             }, headers={"X-Process-Time": f"{time.time() - start_time:.2f}"})
 
@@ -564,11 +546,8 @@ async def shopify_face_swap(
 
         # Temporarily disable cache for debugging
         # if cache_key in cache:
-        #     result_url = f"/{cache[cache_key]}"
+        #     result_url = cache[cache_key]
         #     logger.info(f"Cache hit: {result_url}")
-        #     if not os.path.exists(result_url.lstrip("/")):
-        #         logger.error(f"Cached file {result_url} does not exist")
-        #         raise HTTPException(500, detail=f"Cached file {result_url} does not exist")
         #     background_tasks.add_task(cleanup_output_folder)
         #     logger.debug(f"Returning cached result URL: {result_url}")
         #     return JSONResponse({
@@ -589,21 +568,16 @@ async def shopify_face_swap(
             with open(product_path, "wb") as f:
                 f.write(product_content)
 
-            result = await face_swap(user_path, product_path, dest_face_idx=dest_face_idx, task_id=task_id)
-            cache[cache_key] = result
-            logger.info(f"Cached high-quality result: {result}")
-            logger.debug(f"Returning result URL: /{result}")
-
-            # Verify result file exists before returning
-            if not os.path.exists(result.lstrip("/")):
-                logger.error(f"Result file {result} does not exist")
-                raise HTTPException(500, detail=f"Result file {result} does not exist")
+            result_url = await face_swap(user_path, product_path, dest_face_idx=dest_face_idx, task_id=task_id)
+            cache[cache_key] = result_url
+            logger.info(f"Cached high-quality result: {result_url}")
+            logger.debug(f"Returning result URL: {result_url}")
 
             background_tasks.add_task(cleanup_output_folder)
 
             return JSONResponse({
                 "success": True,
-                "data": {"result_image": f"/{result}", "task_id": task_id},
+                "data": {"result_image": result_url, "task_id": task_id},
                 "error": None
             }, headers={"X-Process-Time": f"{time.time() - start_time:.2f}"})
 
