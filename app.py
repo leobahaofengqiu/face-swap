@@ -277,11 +277,56 @@ async def face_swap(
             if os.path.exists(temp_output_path):
                 os.unlink(temp_output_path)
             raise
+        finally:
+            try:
+                client.close()
+                logger.debug(f"Gradio client closed for task {task_id}")
+            except Exception as e:
+                logger.warning(f"Failed to close Gradio client: {str(e)}")
+
+        # Apply Tile-Upscaler enhancement
+        progress_tracker[task_id] = "Applying Tile-Upscaler enhancement"
+        logger.debug(f"Initializing Tile-Upscaler client for task {task_id}")
+        try:
+            upscaler_client = Client("gokaygokay/Tile-Upscaler")
+            enhanced_result = upscaler_client.predict(
+                param_0=handle_file(temp_output_path),
+                param_1=512,  # Tile size
+                param_2=20,   # Denoising steps
+                param_3=0.4,  # CFG scale
+                param_4=0,    # Seed (0 for random)
+                param_5=3,    # Upscale factor
+                api_name="/wrapper"
+            )
+            
+            if enhanced_result and os.path.exists(enhanced_result) and validate_image(enhanced_result):
+                with Image.open(enhanced_result) as img:
+                    img = img.convert("RGB")
+                    img.save(
+                        temp_output_path,
+                        "PNG",
+                        quality=CONFIG["QUALITY"],
+                        optimize=True,
+                        progressive=True
+                    )
+                size, width, height = get_image_size(temp_output_path)
+                logger.info(f"Tile-Upscaler enhancement succeeded, size: {width}x{height} ({size} pixels)")
+                progress_tracker[task_id] = f"Tile-Upscaler enhancement succeeded, size: {width}x{height} ({size} pixels)"
+            else:
+                logger.warning(f"Tile-Upscaler enhancement failed or produced invalid result")
+                progress_tracker[task_id] = f"Tile-Upscaler enhancement failed"
+                # Proceed with original face swap result if enhancement fails
+            upscaler_client.close()
+            logger.debug(f"Tile-Upscaler client closed for task {task_id}")
+        except Exception as e:
+            logger.warning(f"Tile-Upscaler enhancement failed: {str(e)}")
+            progress_tracker[task_id] = f"Tile-Upscaler enhancement failed: {str(e)}"
+            # Proceed with original face swap result if enhancement fails
 
         unique_filename = f"face_swap_{uuid.uuid4().hex}.png"
         output_path = os.path.join(CONFIG["OUTPUT_FOLDER"], unique_filename)
         
-        progress_tracker[task_id] = "Applying high-quality enhancements"
+        progress_tracker[task_id] = "Applying final high-quality enhancements"
         logger.debug(f"Saving face swap result (face number {dest_face_idx}, size {width}x{height}) to {output_path}")
         with Image.open(temp_output_path) as img:
             img = img.convert("RGB")
@@ -309,13 +354,6 @@ async def face_swap(
         progress_tracker[task_id] = f"Error: {str(e)}"
         logger.error(f"Face swap failed: {str(e)} with files {source_image}, {dest_image}")
         raise
-    finally:
-        if 'client' in locals():
-            try:
-                client.close()
-                logger.debug(f"Gradio client closed for task {task_id}")
-            except Exception as e:
-                logger.warning(f"Failed to close Gradio client: {str(e)}")
 
 @app.options("/shopify-face-swap", description="Handle CORS preflight requests")
 async def cors_preflight():
