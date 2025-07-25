@@ -179,10 +179,12 @@ def high_quality_preprocess(content: bytes) -> bytes:
 
 async def high_quality_enhance(image_path: str) -> str:
     client = None
+    temp_enhanced_path = None
     try:
         logger.debug(f"Initializing Tile-Upscaler client for {image_path}")
         client = Client("gokaygokay/Tile-Upscaler", httpx_kwargs={"timeout": CONFIG["GRADIO_TIMEOUT"]})
         
+        logger.debug(f"Sending image {image_path} to Tile-Upscaler")
         result = client.predict(
             param_0=handle_file(image_path),
             param_1=512,
@@ -198,6 +200,7 @@ async def high_quality_enhance(image_path: str) -> str:
             raise ValueError("No valid enhanced image returned")
         
         enhanced_path = result[0]
+        logger.debug(f"Gradio returned enhanced path: {enhanced_path}")
         if not os.path.exists(enhanced_path):
             logger.error(f"Enhanced image file {enhanced_path} does not exist")
             raise ValueError(f"Enhanced image file {enhanced_path} does not exist")
@@ -205,30 +208,50 @@ async def high_quality_enhance(image_path: str) -> str:
         unique_filename = f"enhanced_{uuid.uuid4().hex}.png"
         final_output_path = os.path.join(CONFIG["OUTPUT_FOLDER"], unique_filename)
         
-        # Convert Gradio output (webp) to PNG
-        with Image.open(enhanced_path) as img:
-            img = img.convert("RGB")
-            img.save(
-                final_output_path,
-                "PNG",
-                quality=CONFIG["QUALITY"],
-                optimize=True,
-                progressive=True
-            )
-        logger.debug(f"Enhanced image saved to {final_output_path}")
+        # Convert Gradio output (webp) to PNG with retry
+        for attempt in range(3):
+            try:
+                with Image.open(enhanced_path) as img:
+                    img = img.convert("RGB")
+                    img.save(
+                        final_output_path,
+                        "PNG",
+                        quality=CONFIG["QUALITY"],
+                        optimize=True,
+                        progressive=True
+                    )
+                break
+            except Exception as e:
+                logger.warning(f"Attempt {attempt + 1} failed to save enhanced image: {str(e)}")
+                if attempt == 2:
+                    logger.error(f"Failed to save enhanced image after 3 attempts: {str(e)}")
+                    raise ValueError(f"Failed to save enhanced image to {final_output_path}: {str(e)}")
+                time.sleep(1)  # Wait before retrying
         
         # Verify the saved file
         if not os.path.exists(final_output_path):
-            logger.error(f"Failed to save enhanced image to {final_output_path}")
-            raise ValueError(f"Failed to save enhanced image to {final_output_path}")
+            logger.error(f"Enhanced image file {final_output_path} was not created")
+            raise ValueError(f"Enhanced image file {final_output_path} was not created")
         
-        logger.info(f"Image enhancement completed for {final_output_path}")
+        # Check file size to ensure it's not empty
+        file_size = os.path.getsize(final_output_path)
+        if file_size < CONFIG["MIN_IMAGE_SIZE"]:
+            logger.error(f"Enhanced image {final_output_path} is too small ({file_size} bytes)")
+            raise ValueError(f"Enhanced image {final_output_path} is too small ({file_size} bytes)")
+        
+        logger.info(f"Image enhancement completed for {final_output_path} (size: {file_size} bytes)")
         return final_output_path
         
     except Exception as e:
         logger.error(f"Image enhancement failed for {image_path}: {str(e)}")
         raise
     finally:
+        if temp_enhanced_path and os.path.exists(temp_enhanced_path):
+            try:
+                os.unlink(temp_enhanced_path)
+                logger.debug(f"Cleaned up temporary enhanced file: {temp_enhanced_path}")
+            except FileNotFoundError:
+                logger.warning(f"Temporary enhanced file {temp_enhanced_path} already deleted")
         if client:
             try:
                 client.close()
@@ -327,6 +350,7 @@ async def face_swap(
         if temp_output_path and os.path.exists(temp_output_path):
             try:
                 os.unlink(temp_output_path)
+                logger.debug(f"Cleaned up temporary file: {temp_output_path}")
             except FileNotFoundError:
                 logger.warning(f"Temporary file {temp_output_path} already deleted")
         if client:
@@ -391,19 +415,20 @@ async def swap_faces(
 
         cache_key = f"{get_file_hash(source_content)}:{get_file_hash(dest_content)}"
 
-        if cache_key in cache:
-            result_url = f"/{cache[cache_key]}"
-            logger.info(f"Cache hit: {result_url}")
-            if not os.path.exists(result_url.lstrip("/")):
-                logger.error(f"Cached file {result_url} does not exist")
-                raise HTTPException(500, detail=f"Cached file {result_url} does not exist")
-            background_tasks.add_task(cleanup_output_folder)
-            logger.debug(f"Returning cached result URL: {result_url}")
-            return JSONResponse({
-                "success": True,
-                "data": {"result_image": result_url, "task_id": task_id},
-                "error": None
-            }, headers={"X-Process-Time": f"{time.time() - start_time:.2f}"})
+        # Temporarily disable cache for debugging
+        # if cache_key in cache:
+        #     result_url = f"/{cache[cache_key]}"
+        #     logger.info(f"Cache hit: {result_url}")
+        #     if not os.path.exists(result_url.lstrip("/")):
+        #         logger.error(f"Cached file {result_url} does not exist")
+        #         raise HTTPException(500, detail=f"Cached file {result_url} does not exist")
+        #     background_tasks.add_task(cleanup_output_folder)
+        #     logger.debug(f"Returning cached result URL: {result_url}")
+        #     return JSONResponse({
+        #         "success": True,
+        #         "data": {"result_image": result_url, "task_id": task_id},
+        #         "error": None
+        #     }, headers={"X-Process-Time": f"{time.time() - start_time:.2f}"})
 
         with tempfile.TemporaryDirectory() as temp_dir:
             source_filename = f"source_{uuid.uuid4().hex}.{source_image.filename.rsplit('.', 1)[1]}"
@@ -420,6 +445,11 @@ async def swap_faces(
             cache[cache_key] = result
             logger.info(f"Cached high-quality result: {result}")
             logger.debug(f"Returning result URL: /{result}")
+
+            # Verify result file exists before returning
+            if not os.path.exists(result.lstrip("/")):
+                logger.error(f"Result file {result} does not exist")
+                raise HTTPException(500, detail=f"Result file {result} does not exist")
 
             background_tasks.add_task(cleanup_output_folder)
 
@@ -531,19 +561,21 @@ async def shopify_face_swap(
             dest_face_idx = 2
 
         cache_key = f"{get_file_hash(user_content)}:{get_file_hash(product_content)}:{dest_face_idx}"
-        if cache_key in cache:
-            result_url = f"/{cache[cache_key]}"
-            logger.info(f"Cache hit: {result_url}")
-            if not os.path.exists(result_url.lstrip("/")):
-                logger.error(f"Cached file {result_url} does not exist")
-                raise HTTPException(500, detail=f"Cached file {result_url} does not exist")
-            background_tasks.add_task(cleanup_output_folder)
-            logger.debug(f"Returning cached result URL: {result_url}")
-            return JSONResponse({
-                "success": True,
-                "data": {"result_image": result_url, "task_id": task_id},
-                "error": None
-            }, headers={"X-Process-Time": f"{time.time() - start_time:.2f}"})
+
+        # Temporarily disable cache for debugging
+        # if cache_key in cache:
+        #     result_url = f"/{cache[cache_key]}"
+        #     logger.info(f"Cache hit: {result_url}")
+        #     if not os.path.exists(result_url.lstrip("/")):
+        #         logger.error(f"Cached file {result_url} does not exist")
+        #         raise HTTPException(500, detail=f"Cached file {result_url} does not exist")
+        #     background_tasks.add_task(cleanup_output_folder)
+        #     logger.debug(f"Returning cached result URL: {result_url}")
+        #     return JSONResponse({
+        #         "success": True,
+        #         "data": {"result_image": result_url, "task_id": task_id},
+        #         "error": None
+        #     }, headers={"X-Process-Time": f"{time.time() - start_time:.2f}"})
 
         with tempfile.TemporaryDirectory() as temp_dir:
             user_filename = f"user_{uuid.uuid4().hex}.{user_image.filename.rsplit('.', 1)[1]}"
@@ -562,6 +594,11 @@ async def shopify_face_swap(
             logger.info(f"Cached high-quality result: {result}")
             logger.debug(f"Returning result URL: /{result}")
 
+            # Verify result file exists before returning
+            if not os.path.exists(result.lstrip("/")):
+                logger.error(f"Result file {result} does not exist")
+                raise HTTPException(500, detail=f"Result file {result} does not exist")
+
             background_tasks.add_task(cleanup_output_folder)
 
             return JSONResponse({
@@ -576,6 +613,7 @@ async def shopify_face_swap(
         if temp_file_path and os.path.exists(temp_file_path):
             try:
                 os.unlink(temp_file_path)
+                logger.debug(f"Cleaned up temporary file: {temp_file_path}")
             except FileNotFoundError:
                 logger.warning(f"Temporary file {temp_file_path} already deleted")
         return JSONResponse(
@@ -589,6 +627,7 @@ async def shopify_face_swap(
         if temp_file_path and os.path.exists(temp_file_path):
             try:
                 os.unlink(temp_file_path)
+                logger.debug(f"Cleaned up temporary file: {temp_file_path}")
             except FileNotFoundError:
                 logger.warning(f"Temporary file {temp_file_path} already deleted")
         return JSONResponse(
