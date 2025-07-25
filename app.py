@@ -47,11 +47,11 @@ CONFIG = {
     "MAX_FILE_SIZE": int(os.getenv("MAX_FILE_SIZE", 30 * 1024 * 1024)),  # 30MB
     "CACHE_TTL": int(os.getenv("CACHE_TTL", 7200)),  # 2 hours
     "MAX_CACHE_SIZE": int(os.getenv("MAX_CACHE_SIZE", 100)),
-    "CLEANUP_INTERVAL": int(os.getenv("CLEANUP_INTERVAL", 86400)),  # Increased to 24 hours
+    "CLEANUP_INTERVAL": int(os.getenv("CLEANUP_INTERVAL", 86400)),  # 24 hours
     "QUALITY": int(os.getenv("QUALITY", 98)),
     "PRESERVE_RESOLUTION": True,
-    "MIN_IMAGE_SIZE": 10000,  # Minimum file size in bytes to consider image valid
-    "GRADIO_TIMEOUT": int(os.getenv("GRADIO_TIMEOUT", 120)),  # Timeout for Gradio client
+    "MIN_IMAGE_SIZE": 10000,  # Minimum file size in bytes
+    "GRADIO_TIMEOUT": int(os.getenv("GRADIO_TIMEOUT", 120)),  # Timeout for Gradio
 }
 
 # Create directories and verify permissions
@@ -103,8 +103,8 @@ def allowed_file(filename: str) -> bool:
 def validate_image(file_path: str) -> bool:
     try:
         with Image.open(file_path) as img:
-            img.verify()  # Verify image integrity
-            img = Image.open(file_path)  # Reopen to check format
+            img.verify()
+            img = Image.open(file_path)
             if img.format.lower() not in CONFIG["ALLOWED_EXTENSIONS"]:
                 logger.error(f"Image format {img.format} not in allowed extensions")
                 return False
@@ -154,7 +154,7 @@ def high_quality_preprocess(content: bytes) -> bytes:
             if img.mode != 'RGB':
                 img = img.convert('RGB')
             
-            max_size = (1280, 1280)  # Optimize for transfer
+            max_size = (1280, 1280)
             if not CONFIG["PRESERVE_RESOLUTION"]:
                 img.thumbnail(max_size, Image.Resampling.LANCZOS)
             
@@ -179,10 +179,12 @@ def high_quality_preprocess(content: bytes) -> bytes:
 
 async def high_quality_enhance(image_path: str) -> str:
     client = None
+    temp_download_path = None
     try:
         logger.debug(f"Initializing Tile-Upscaler client for {image_path}")
         client = Client("gokaygokay/Tile-Upscaler", httpx_kwargs={"timeout": CONFIG["GRADIO_TIMEOUT"]})
         
+        logger.debug(f"Sending image {image_path} to Tile-Upscaler")
         result = client.predict(
             param_0=handle_file(image_path),
             param_1=512,
@@ -193,22 +195,43 @@ async def high_quality_enhance(image_path: str) -> str:
             api_name="/wrapper"
         )
         
+        logger.debug(f"Gradio predict result: {result}")
         if not result or not isinstance(result, list) or not result:
             logger.error(f"No valid enhanced image returned for {image_path}")
             raise ValueError("No valid enhanced image returned")
         
-        enhanced_path = result[0]
-        if not os.path.exists(enhanced_path):
-            logger.error(f"Enhanced image file {enhanced_path} does not exist")
-            raise ValueError(f"Enhanced image file {enhanced_path} does not exist")
+        enhanced_url = result[0]
+        logger.debug(f"Enhanced image URL from Gradio: {enhanced_url}")
         
+        # Download the enhanced image from the Gradio URL
+        try:
+            response = requests.get(enhanced_url, timeout=30)
+            if response.status_code != 200:
+                logger.error(f"Failed to download enhanced image from {enhanced_url}: HTTP {response.status_code}")
+                raise ValueError(f"Failed to download enhanced image: HTTP {response.status_code}")
+            enhanced_content = response.content
+            logger.debug(f"Downloaded {len(enhanced_content)} bytes from {enhanced_url}")
+        except requests.RequestException as e:
+            logger.error(f"Failed to download enhanced image from {enhanced_url}: {str(e)}")
+            raise ValueError(f"Failed to download enhanced image: {str(e)}")
+        
+        # Save downloaded content to a temporary file
+        with tempfile.NamedTemporaryFile(suffix=".webp", delete=False) as temp_file:
+            temp_file.write(enhanced_content)
+            temp_download_path = temp_file.name
+        logger.debug(f"Saved downloaded image to temporary file: {temp_download_path}")
+        
+        # Validate the downloaded image
+        if not validate_image(temp_download_path):
+            logger.error(f"Downloaded image validation failed: {temp_download_path}")
+            raise ValueError(f"Downloaded image is invalid: {temp_download_path}")
+        
+        # Create final output path
         unique_filename = f"enhanced_{uuid.uuid4().hex}.png"
         final_output_path = os.path.join(CONFIG["OUTPUT_FOLDER"], unique_filename)
         
-        shutil.copy(enhanced_path, final_output_path)
-        logger.debug(f"Enhanced image copied to {final_output_path}")
-        
-        with Image.open(final_output_path) as img:
+        # Convert and save as PNG
+        with Image.open(temp_download_path) as img:
             img = img.convert("RGB")
             img.save(
                 final_output_path,
@@ -217,14 +240,26 @@ async def high_quality_enhance(image_path: str) -> str:
                 optimize=True,
                 progressive=True
             )
-        logger.info(f"Image enhancement completed for {final_output_path}")
+        logger.debug(f"Converted and saved enhanced image to {final_output_path}")
         
+        # Validate final output
+        if not os.path.exists(final_output_path) or not validate_image(final_output_path):
+            logger.error(f"Final enhanced image not created or invalid: {final_output_path}")
+            raise ValueError(f"Final enhanced image not created or invalid: {final_output_path}")
+        
+        logger.info(f"Image enhancement completed for {final_output_path}")
         return final_output_path
         
     except Exception as e:
         logger.error(f"Image enhancement failed for {image_path}: {str(e)}")
         raise
     finally:
+        if temp_download_path and os.path.exists(temp_download_path):
+            try:
+                os.unlink(temp_download_path)
+                logger.debug(f"Cleaned up temporary download file: {temp_download_path}")
+            except Exception as e:
+                logger.warning(f"Failed to clean up temporary download file {temp_download_path}: {str(e)}")
         if client:
             try:
                 client.close()
@@ -400,7 +435,10 @@ async def swap_faces(
                 "success": True,
                 "data": {"result_image": result_url, "task_id": task_id},
                 "error": None
-            }, headers={"X-Process-Time": f"{time.time() - start_time:.2f}"})
+            }, headers={
+                "X-Process-Time": f"{time.time() - start_time:.2f}",
+                "Cache-Control": "no-cache, no-store, must-revalidate"
+            })
 
         with tempfile.TemporaryDirectory() as temp_dir:
             source_filename = f"source_{uuid.uuid4().hex}.{source_image.filename.rsplit('.', 1)[1]}"
@@ -424,7 +462,10 @@ async def swap_faces(
                 "success": True,
                 "data": {"result_image": f"/{result}", "task_id": task_id},
                 "error": None
-            }, headers={"X-Process-Time": f"{time.time() - start_time:.2f}"})
+            }, headers={
+                "X-Process-Time": f"{time.time() - start_time:.2f}",
+                "Cache-Control": "no-cache, no-store, must-revalidate"
+            })
 
     except HTTPException as e:
         logger.error(f"Face swap error: {str(e)}")
@@ -540,7 +581,10 @@ async def shopify_face_swap(
                 "success": True,
                 "data": {"result_image": result_url, "task_id": task_id},
                 "error": None
-            }, headers={"X-Process-Time": f"{time.time() - start_time:.2f}"})
+            }, headers={
+                "X-Process-Time": f"{time.time() - start_time:.2f}",
+                "Cache-Control": "no-cache, no-store, must-revalidate"
+            })
 
         with tempfile.TemporaryDirectory() as temp_dir:
             user_filename = f"user_{uuid.uuid4().hex}.{user_image.filename.rsplit('.', 1)[1]}"
@@ -565,7 +609,10 @@ async def shopify_face_swap(
                 "success": True,
                 "data": {"result_image": f"/{result}", "task_id": task_id},
                 "error": None
-            }, headers={"X-Process-Time": f"{time.time() - start_time:.2f}"})
+            }, headers={
+                "X-Process-Time": f"{time.time() - start_time:.2f}",
+                "Cache-Control": "no-cache, no-store, must-revalidate"
+            })
 
     except HTTPException as e:
         logger.error(f"Shopify face swap error: {str(e)}")
