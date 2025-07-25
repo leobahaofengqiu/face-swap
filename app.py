@@ -48,8 +48,6 @@ CONFIG = {
     "CACHE_TTL": int(os.getenv("CACHE_TTL", 7200)),  # 2 hours
     "MAX_CACHE_SIZE": int(os.getenv("MAX_CACHE_SIZE", 100)),
     "CLEANUP_INTERVAL": int(os.getenv("CLEANUP_INTERVAL", 86400)),  # 24 hours
-    "QUALITY": int(os.getenv("QUALITY", 98)),
-    "PRESERVE_RESOLUTION": True,
     "MIN_IMAGE_SIZE": 10000,  # Minimum file size in bytes
     "GRADIO_TIMEOUT": int(os.getenv("GRADIO_TIMEOUT", 120)),  # Timeout for Gradio client
 }
@@ -104,10 +102,6 @@ def validate_image(file_path: str) -> bool:
     try:
         with Image.open(file_path) as img:
             img.verify()  # Verify image integrity
-            img = Image.open(file_path)  # Reopen to check format
-            if img.format.lower() not in CONFIG["ALLOWED_EXTENSIONS"]:
-                logger.error(f"Image format {img.format} not in allowed extensions")
-                return False
             if os.path.getsize(file_path) < CONFIG["MIN_IMAGE_SIZE"]:
                 logger.error(f"Image too small or potentially corrupted: {file_path}")
                 return False
@@ -137,17 +131,6 @@ def validate_image_url(url: str) -> bool:
         logger.error(f"Failed to validate image URL {url}: {str(e)}")
         return False
 
-def get_image_size(image_path: str) -> Tuple[int, int, int]:
-    try:
-        with Image.open(image_path) as img:
-            width, height = img.size
-            size = width * height
-            logger.debug(f"Image size for {image_path}: {size} (width: {width}, height: {height})")
-            return size, width, height
-    except Exception as e:
-        logger.error(f"Failed to get image size for {image_path}: {str(e)}")
-        return 0, 0, 0
-
 def get_file_hash(file_content: bytes) -> str:
     return hashlib.sha256(file_content).hexdigest()
 
@@ -163,39 +146,6 @@ def get_image_extension(content: bytes) -> str:
     except Exception as e:
         logger.error(f"Failed to get image extension: {str(e)}")
         return "jpg"
-
-def high_quality_preprocess(content: bytes) -> bytes:
-    try:
-        with tempfile.NamedTemporaryFile(suffix=".tmp", delete=False) as temp_file:
-            temp_file.write(content)
-            temp_file_path = temp_file.name
-        
-        with Image.open(temp_file_path) as img:
-            if img.mode != 'RGB':
-                img = img.convert('RGB')
-            
-            max_size = (1280, 1280)  # Optimize for transfer
-            if not CONFIG["PRESERVE_RESOLUTION"]:
-                img.thumbnail(max_size, Image.Resampling.LANCZOS)
-            
-            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as output_file:
-                img.save(
-                    output_file.name,
-                    "PNG",
-                    optimize=True,
-                    quality=CONFIG["QUALITY"],
-                    progressive=True
-                )
-                with open(output_file.name, "rb") as f:
-                    result = f.read()
-        
-        os.unlink(temp_file_path)
-        os.unlink(output_file.name)
-        logger.debug(f"Image preprocessing completed")
-        return result
-    except Exception as e:
-        logger.error(f"Image preprocessing failed: {str(e)}")
-        return content
 
 async def high_quality_enhance(image_path: str) -> str:
     client = None
@@ -223,14 +173,11 @@ async def high_quality_enhance(image_path: str) -> str:
         enhanced_path = result[0]
         logger.info(f"Gradio returned enhanced path: {enhanced_path}")
         
-        # Check if enhanced_path is a URL or local file
         if enhanced_path.startswith(('http://', 'https://')):
             gradio_url = enhanced_path
         else:
-            # Assume it's a Gradio temporary file path (e.g., /tmp/gradio/.../image.webp)
             gradio_url = f"https://gokaygokay-tile-upscaler.hf.space/file={enhanced_path}"
         
-        # Validate the URL
         if not validate_image_url(gradio_url):
             logger.error(f"Invalid or inaccessible Gradio image URL: {gradio_url}")
             raise ValueError(f"Invalid or inaccessible Gradio image URL: {gradio_url}")
@@ -303,18 +250,9 @@ async def face_swap(
 
             logger.info(f"Gradio face swap returned: {result}")
             if result and os.path.exists(result) and validate_image(result):
-                with Image.open(result) as img:
-                    img = img.convert("RGB")
-                    img.save(
-                        temp_output_path,
-                        "PNG",
-                        quality=CONFIG["QUALITY"],
-                        optimize=True,
-                        progressive=True
-                    )
-                size, width, height = get_image_size(temp_output_path)
-                logger.info(f"Face swap succeeded, size: {width}x{height} ({size} pixels)")
-                progress_tracker[task_id] = f"Face swap succeeded, size: {width}x{height} ({size} pixels)"
+                shutil.copy(result, temp_output_path)
+                logger.info(f"Face swap succeeded, copied to {temp_output_path}")
+                progress_tracker[task_id] = f"Face swap succeeded"
             else:
                 logger.error(f"Face swap failed or produced invalid result: {result}")
                 progress_tracker[task_id] = f"Face swap failed"
@@ -324,8 +262,8 @@ async def face_swap(
             progress_tracker[task_id] = f"Face swap failed: {str(e)}"
             raise
 
-        progress_tracker[task_id] = "Applying high-quality enhancements"
-        logger.debug(f"Enhancing face swap result")
+        progress_tracker[task_id] = "Applying tile-based upscaling"
+        logger.debug(f"Enhancing face swap result with Tile-Upscaler")
         enhanced_output_url = await high_quality_enhance(temp_output_path)
         
         logger.info(f"Completed face swap (URL: {enhanced_output_url})")
@@ -399,23 +337,7 @@ async def swap_faces(
                 detail=f"File size exceeds {CONFIG['MAX_FILE_SIZE'] / (1024 * 1024)}MB"
             )
 
-        progress_tracker[task_id] = "Preprocessing images for high quality"
-        source_content = high_quality_preprocess(source_content)
-        dest_content = high_quality_preprocess(dest_content)
-
         cache_key = f"{get_file_hash(source_content)}:{get_file_hash(dest_content)}"
-
-        # Temporarily disable cache for debugging
-        # if cache_key in cache:
-        #     result_url = cache[cache_key]
-        #     logger.info(f"Cache hit: {result_url}")
-        #     background_tasks.add_task(cleanup_output_folder)
-        #     logger.debug(f"Returning cached result URL: {result_url}")
-        #     return JSONResponse({
-        #         "success": True,
-        #         "data": {"result_image": result_url, "task_id": task_id},
-        #         "error": None
-        #     }, headers={"X-Process-Time": f"{time.time() - start_time:.2f}"})
 
         with tempfile.TemporaryDirectory() as temp_dir:
             source_filename = f"source_{uuid.uuid4().hex}.{source_image.filename.rsplit('.', 1)[1]}"
@@ -530,10 +452,6 @@ async def shopify_face_swap(
             logger.error(f"Invalid product image format: {product_image_url}")
             raise HTTPException(400, detail=f"Invalid product image format: {product_image_url}")
 
-        progress_tracker[task_id] = "Preprocessing images for high quality"
-        user_content = high_quality_preprocess(user_content)
-        product_content = high_quality_preprocess(product_content)
-
         dest_face_idx = 1
         if "TEACHER.webp" in product_image_url:
             dest_face_idx = 3
@@ -543,18 +461,6 @@ async def shopify_face_swap(
             dest_face_idx = 2
 
         cache_key = f"{get_file_hash(user_content)}:{get_file_hash(product_content)}:{dest_face_idx}"
-
-        # Temporarily disable cache for debugging
-        # if cache_key in cache:
-        #     result_url = cache[cache_key]
-        #     logger.info(f"Cache hit: {result_url}")
-        #     background_tasks.add_task(cleanup_output_folder)
-        #     logger.debug(f"Returning cached result URL: {result_url}")
-        #     return JSONResponse({
-        #         "success": True,
-        #         "data": {"result_image": result_url, "task_id": task_id},
-        #         "error": None
-        #     }, headers={"X-Process-Time": f"{time.time() - start_time:.2f}"})
 
         with tempfile.TemporaryDirectory() as temp_dir:
             user_filename = f"user_{uuid.uuid4().hex}.{user_image.filename.rsplit('.', 1)[1]}"
