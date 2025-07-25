@@ -51,6 +51,7 @@ CONFIG = {
     "QUALITY": int(os.getenv("QUALITY", 98)),
     "PRESERVE_RESOLUTION": True,
     "MIN_IMAGE_SIZE": 10000,  # Minimum file size in bytes to consider image valid
+    "GRADIO_TIMEOUT": int(os.getenv("GRADIO_TIMEOUT", 120)),  # Increased timeout for Gradio client
 }
 
 # Create directories and verify permissions
@@ -148,13 +149,10 @@ def high_quality_preprocess(content: bytes) -> bytes:
             if img.mode != 'RGB':
                 img = img.convert('RGB')
             
-            if CONFIG["PRESERVE_RESOLUTION"]:
-                img = img.copy()
-            else:
-                original_size = img.size
-                img.thumbnail((1920, 1920), Image.Resampling.LANCZOS)
-                if img.size != original_size:
-                    img = img.resize(original_size, Image.Resampling.LANCZOS)
+            # Optimize image size if too large
+            max_size = (1280, 1280)  # Reduced max resolution to optimize transfer
+            if not CONFIG["PRESERVE_RESOLUTION"]:
+                img.thumbnail(max_size, Image.Resampling.LANCZOS)
             
             with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as output_file:
                 img.save(
@@ -179,7 +177,7 @@ async def high_quality_enhance(image_path: str) -> str:
     try:
         # Initialize Gradio client for Tile-Upscaler
         logger.debug(f"Initializing Tile-Upscaler client for {image_path}")
-        client = Client("gokaygokay/Tile-Upscaler", httpx_kwargs={"timeout": 60.0})
+        client = Client("gokaygokay/Tile-Upscaler", httpx_kwargs={"timeout": CONFIG["GRADIO_TIMEOUT"]})
         
         # Perform enhancement
         result = client.predict(
@@ -246,7 +244,7 @@ async def cleanup_output_folder():
     except Exception as e:
         logger.error(f"Output folder cleanup failed: {str(e)}")
 
-@retry(tries=3, delay=3, backoff=2, exceptions=(Exception,))
+@retry(tries=5, delay=5, backoff=2, exceptions=(Exception,))
 async def face_swap(
     source_image: str,
     dest_image: str,
@@ -260,7 +258,7 @@ async def face_swap(
         progress_tracker[task_id] = "Initializing face swap"
         logger.debug(f"Initializing Gradio client for task {task_id}")
         try:
-            client = Client("Dentro/face-swap")
+            client = Client("Dentro/face-swap", httpx_kwargs={"timeout": CONFIG["GRADIO_TIMEOUT"]})
         except Exception as e:
             logger.error(f"Failed to initialize Gradio client: {str(e)}")
             raise HTTPException(500, detail=f"Gradio client initialization failed: {str(e)}")
@@ -300,7 +298,7 @@ async def face_swap(
                 progress_tracker[task_id] = f"Face swap attempt with destination face number {dest_face_idx} failed"
                 if os.path.exists(temp_output_path):
                     os.unlink(temp_output_path)
-                raise ValueValueError(f"Face swap failed for destination face index {dest_face_idx}")
+                raise ValueError(f"Face swap failed for destination face index {dest_face_idx}")
         except Exception as e:
             logger.warning(f"Face swap attempt with destination face number {dest_face_idx} failed: {str(e)}")
             progress_tracker[task_id] = f"Face swap attempt with destination face number {dest_face_idx} failed: {str(e)}"
