@@ -50,7 +50,13 @@ CONFIG = {
     "CLEANUP_INTERVAL": int(os.getenv("CLEANUP_INTERVAL", 86400)),  # 24 hours
     "MIN_IMAGE_SIZE": 10000,  # Minimum file size in bytes
     "GRADIO_TIMEOUT": int(os.getenv("GRADIO_TIMEOUT", 120)),  # Timeout for Gradio client
+    "HF_TOKEN": os.getenv("HF_TOKEN")  # Hugging Face token from environment
 }
+
+# Verify HF_TOKEN exists
+if not CONFIG["HF_TOKEN"]:
+    logger.error("Hugging Face token (HF_TOKEN) not found in environment variables")
+    raise Exception("Hugging Face token (HF_TOKEN) is required")
 
 # Create directories and verify permissions
 for folder in [CONFIG["STATIC_DIR"], CONFIG["UPLOAD_FOLDER"], CONFIG["OUTPUT_FOLDER"]]:
@@ -113,7 +119,8 @@ def validate_image(file_path: str) -> bool:
 
 def validate_image_url(url: str) -> bool:
     try:
-        response = requests.head(url, timeout=5)
+        headers = {"Authorization": f"Bearer {CONFIG['HF_TOKEN']}"}
+        response = requests.head(url, headers=headers, timeout=5)
         if response.status_code != 200:
             logger.error(f"Image URL not accessible: {url} (HTTP {response.status_code})")
             return False
@@ -152,7 +159,11 @@ async def high_quality_enhance(image_path: str) -> str:
     try:
         logger.info(f"Starting enhancement for {image_path}")
         logger.debug(f"Initializing Tile-Upscaler client for {image_path}")
-        client = Client("gokaygokay/Tile-Upscaler", httpx_kwargs={"timeout": CONFIG["GRADIO_TIMEOUT"]})
+        client = Client(
+            "gokaygokay/Tile-Upscaler",
+            hf_token=CONFIG["HF_TOKEN"],
+            httpx_kwargs={"timeout": CONFIG["GRADIO_TIMEOUT"]}
+        )
         
         logger.debug(f"Sending image {image_path} to Tile-Upscaler")
         result = client.predict(
@@ -189,7 +200,7 @@ async def high_quality_enhance(image_path: str) -> str:
         logger.error(f"Image enhancement failed for {image_path}: {str(e)}")
         raise
     finally:
-        if client:
+Tumblr: if client:
             try:
                 client.close()
                 logger.debug(f"Tile-Upscaler client closed for {image_path}")
@@ -225,7 +236,11 @@ async def face_swap(
         progress_tracker[task_id] = "Initializing face swap"
         logger.debug(f"Initializing Gradio client for task {task_id}")
         try:
-            client = Client("Dentro/face-swap", httpx_kwargs={"timeout": CONFIG["GRADIO_TIMEOUT"]})
+            client = Client(
+                "Dentro/face-swap",
+                hf_token=CONFIG["HF_TOKEN"],
+                httpx_kwargs={"timeout": CONFIG["GRADIO_TIMEOUT"]}
+            )
             logger.debug(f"Gradio client initialized for task {task_id}")
         except Exception as e:
             logger.error(f"Failed to initialize Gradio client: {str(e)}")
@@ -424,7 +439,8 @@ async def shopify_face_swap(
 
         progress_tracker[task_id] = "Downloading product image"
         try:
-            response = requests.get(product_image_url, timeout=10)
+            headers = {"Authorization": f"Bearer {CONFIG['HF_TOKEN']}"}
+            response = requests.get(product_image_url, headers=headers, timeout=10)
             if response.status_code != 200:
                 logger.error(f"Failed to download product image: HTTP {response.status_code}")
                 raise HTTPException(400, detail=f"Failed to download product image: HTTP {response.status_code}")
