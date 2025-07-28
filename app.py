@@ -168,9 +168,9 @@ async def high_quality_enhance(image_path: str) -> str:
         logger.debug(f"Sending image {image_path} to Tile-Upscaler")
         result = client.predict(
             param_0=handle_file(image_path),
-            param_1=512,
-            param_2=20,
-            param_3=0.4,
+            param_1=1024,
+            param_2=50,
+            param_3=0.03,
             param_4=0,
             param_5=3,
             api_name="/wrapper"
