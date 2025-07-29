@@ -170,7 +170,7 @@ async def high_quality_enhance(image_path: str) -> str:
             param_0=handle_file(image_path),
             param_1=1024,
             param_2=50,
-            param_3=0.03,
+            param_3=0.35,
             param_4=0,
             param_5=3,
             api_name="/wrapper"
