@@ -18,6 +18,10 @@ from gradio_client import Client, handle_file
 from retry import retry
 import asyncio
 import shutil
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 # Configure logging
 logging.basicConfig(
@@ -154,58 +158,117 @@ def get_image_extension(content: bytes) -> str:
         logger.error(f"Failed to get image extension: {str(e)}")
         return "jpg"
 
-async def high_quality_enhance(image_path: str) -> str:
-    client = None
+async def high_quality_enhance(image_path: str, task_id: str) -> str:
+    sdlx_client = None
+    codeformer_client = None
+    temp_sdlx_output = None
     try:
-        logger.info(f"Starting enhancement for {image_path}")
-        logger.debug(f"Initializing Tile-Upscaler client for {image_path}")
-        client = Client(
-            "gokaygokay/Tile-Upscaler",
+        logger.info(f"Starting enhancement pipeline for {image_path} (task {task_id})")
+        
+        # Step 1: Enhance with sdlx_enhance_image
+        progress_tracker[task_id] = "Enhancing with sdlx_enhance_image"
+        logger.debug(f"Initializing sdlx_enhance_image client for {image_path}")
+        sdlx_client = Client(
+            "habibahmad/sdlx_enhance_image",
             hf_token=CONFIG["HF_TOKEN"],
             httpx_kwargs={"timeout": CONFIG["GRADIO_TIMEOUT"]}
         )
         
-        logger.debug(f"Sending image {image_path} to Tile-Upscaler")
-        result = client.predict(
-            param_0=handle_file(image_path),
-            param_1=1024,
-            param_2=50,
-            param_3=0.35,
-            param_4=0,
-            param_5=3,
-            api_name="/wrapper"
+        logger.debug(f"Sending image {image_path} to sdlx_enhance_image")
+        sdlx_result = sdlx_client.predict(
+            input_img=handle_file(image_path),
+            api_name="/predict"
         )
         
-        logger.debug(f"Gradio predict result: {result}")
-        if not result or not isinstance(result, list) or len(result) < 2:
-            logger.error(f"No valid enhanced image returned for {image_path}")
-            raise ValueError("No valid enhanced image returned")
+        logger.debug(f"sdlx_enhance_image result: {sdlx_result}")
+        if not sdlx_result:
+            logger.error(f"No valid output from sdlx_enhance_image for {image_path}")
+            raise ValueError("No valid output from sdlx_enhance_image")
         
-        enhanced_path = result[1]  # Use second result for the desired image
-        logger.info(f"Gradio returned enhanced path: {enhanced_path}")
-        
-        if enhanced_path.startswith(('http://', 'https://')):
-            gradio_url = enhanced_path
+        # Handle sdlx_result (could be a local path or URL)
+        if sdlx_result.startswith(('http://', 'https://')):
+            # Download the sdlx result if it's a URL
+            response = requests.get(sdlx_result, headers={"Authorization": f"Bearer {CONFIG['HF_TOKEN']}"}, timeout=10)
+            response.raise_for_status()
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as temp_file:
+                temp_file.write(response.content)
+                temp_sdlx_output = temp_file.name
         else:
-            gradio_url = f"https://gokaygokay-tile-upscaler.hf.space/file={enhanced_path}"
+            # Assume local file path
+            if not os.path.exists(sdlx_result) or not validate_image(sdlx_result):
+                logger.error(f"Invalid sdlx_enhance_image output: {sdlx_result}")
+                raise ValueError("Invalid sdlx_enhance_image output")
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as temp_file:
+                shutil.copy(sdlx_result, temp_file.name)
+                temp_sdlx_output = temp_file.name
         
-        if not validate_image_url(gradio_url):
-            logger.error(f"Invalid or inaccessible Gradio image URL: {gradio_url}")
-            raise ValueError(f"Invalid or inaccessible Gradio image URL: {gradio_url}")
+        # Step 2: Enhance with CodeFormer
+        progress_tracker[task_id] = "Enhancing with CodeFormer"
+        logger.debug(f"Initializing CodeFormer client for {temp_sdlx_output}")
+        codeformer_client = Client(
+            "sczhou/CodeFormer",
+            hf_token=CONFIG["HF_TOKEN"],
+            httpx_kwargs={"timeout": CONFIG["GRADIO_TIMEOUT"]}
+        )
         
-        logger.info(f"Returning Gradio enhanced image URL: {gradio_url}")
-        return gradio_url
+        logger.debug(f"Sending image {temp_sdlx_output} to CodeFormer")
+        codeformer_result = codeformer_client.predict(
+            image=handle_file(temp_sdlx_output),
+            face_align=True,
+            background_enhance=True,
+            face_upsample=True,
+            upscale=2,
+            codeformer_fidelity=0.5,
+            api_name="/predict"
+        )
+        
+        logger.debug(f"CodeFormer result: {codeformer_result}")
+        if not codeformer_result:
+            logger.error(f"No valid output from CodeFormer for {temp_sdlx_output}")
+            raise ValueError("No valid output from CodeFormer")
+        
+        # Handle CodeFormer result (could be a local path or URL)
+        if codeformer_result.startswith(('http://', 'https://')):
+            if not validate_image_url(codeformer_result):
+                logger.error(f"Invalid or inaccessible CodeFormer image URL: {codeformer_result}")
+                raise ValueError(f"Invalid or inaccessible CodeFormer image URL: {codeformer_result}")
+            logger.info(f"Returning CodeFormer enhanced image URL: {codeformer_result}")
+            return codeformer_result
+        else:
+            # Assume local file path
+            if not os.path.exists(codeformer_result) or not validate_image(codeformer_result):
+                logger.error(f"Invalid CodeFormer output: {codeformer_result}")
+                raise ValueError("Invalid CodeFormer output")
+            # Move to output folder for serving
+            output_filename = f"enhanced_{uuid.uuid4().hex}.png"
+            output_path = os.path.join(CONFIG["OUTPUT_FOLDER"], output_filename)
+            shutil.copy(codeformer_result, output_path)
+            output_url = f"/static/output/{output_filename}"
+            logger.info(f"Returning CodeFormer enhanced image URL: {output_url}")
+            return output_url
         
     except Exception as e:
-        logger.error(f"Image enhancement failed for {image_path}: {str(e)}")
+        logger.error(f"Image enhancement pipeline failed for {image_path}: {str(e)}")
         raise
     finally:
-        if client:
+        if sdlx_client:
             try:
-                client.close()
-                logger.debug(f"Tile-Upscaler client closed for {image_path}")
+                sdlx_client.close()
+                logger.debug(f"sdlx_enhance_image client closed for {image_path}")
             except Exception as e:
-                logger.warning(f"Failed to close Tile-Upscaler client: {str(e)}")
+                logger.warning(f"Failed to close sdlx_enhance_image client: {str(e)}")
+        if codeformer_client:
+            try:
+                codeformer_client.close()
+                logger.debug(f"CodeFormer client closed for {image_path}")
+            except Exception as e:
+                logger.warning(f"Failed to close CodeFormer client: {str(e)}")
+        if temp_sdlx_output and os.path.exists(temp_sdlx_output):
+            try:
+                os.unlink(temp_sdlx_output)
+                logger.debug(f"Cleaned up temporary sdlx output: {temp_sdlx_output}")
+            except FileNotFoundError:
+                logger.warning(f"Temporary sdlx output {temp_sdlx_output} already deleted")
 
 async def cleanup_output_folder():
     try:
@@ -277,9 +340,9 @@ async def face_swap(
             progress_tracker[task_id] = f"Face swap failed: {str(e)}"
             raise
 
-        progress_tracker[task_id] = "Applying tile-based upscaling"
-        logger.debug(f"Enhancing face swap result with Tile-Upscaler")
-        enhanced_output_url = await high_quality_enhance(temp_output_path)
+        progress_tracker[task_id] = "Applying enhancement pipeline"
+        logger.debug(f"Enhancing face swap result with sdlx_enhance_image and CodeFormer")
+        enhanced_output_url = await high_quality_enhance(temp_output_path, task_id)
         
         logger.info(f"Completed face swap (URL: {enhanced_output_url})")
         progress_tracker[task_id] = f"Completed face swap (URL: {enhanced_output_url})"
