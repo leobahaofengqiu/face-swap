@@ -536,7 +536,7 @@ async def shopify_face_swap(
             dest_face_idx = 3
         elif "REDKNIGHT.webp" in product_image_url:
             dest_face_idx = 4
-        elif any(filename in product_image_url for filename in ["DOCTOR.webp", "BOYCHEF1FINAL.webp", "police_investigator.webp", "CULINARY_GIRL.png", "fsoccer.webp"]):
+        elif any(filename in product_image_url for filename in ["DOCTOR.webp", "BOYCHEF1FINAL.webp", "police_investigator.webp", "CULINARY_GIRL.png", "fsoccer.webp","Pirate_7_1.webp"]):
             dest_face_idx = 2
 
         cache_key = f"{get_file_hash(user_content)}:{get_file_hash(product_content)}:{dest_face_idx}"
