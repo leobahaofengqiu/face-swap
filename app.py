@@ -102,8 +102,8 @@ templates = Jinja2Templates(directory="templates")
 # Cache setup
 cache = TTLCache(maxsize=CONFIG["MAX_CACHE_SIZE"], ttl=CONFIG["CACHE_TTL"])
 
-# Progress tracking
-progress_tracker: Dict[str, str] = {}
+# Progress tracking with URLs
+progress_tracker: Dict[str, Dict[str, str]] = {}
 
 def allowed_file(filename: str) -> bool:
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in CONFIG["ALLOWED_EXTENSIONS"]
@@ -158,15 +158,26 @@ def get_image_extension(content: bytes) -> str:
         logger.error(f"Failed to get image extension: {str(e)}")
         return "jpg"
 
-async def high_quality_enhance(image_path: str, task_id: str) -> str:
+async def high_quality_enhance(image_path: str, task_id: str) -> Tuple[str, str, str]:
     sdlx_client = None
     codeformer_client = None
     temp_sdlx_output = None
+    face_swap_url = None
+    sdlx_url = None
+    codeformer_url = None
     try:
         logger.info(f"Starting enhancement pipeline for {image_path} (task {task_id})")
         
+        # Save face swap result for logging
+        face_swap_filename = f"face_swap_{task_id}_{uuid.uuid4().hex}.png"
+        face_swap_path = os.path.join(CONFIG["OUTPUT_FOLDER"], face_swap_filename)
+        shutil.copy(image_path, face_swap_path)
+        face_swap_url = f"/static/output/{face_swap_filename}"
+        logger.info(f"Face swap image saved at: {face_swap_url}")
+        progress_tracker[task_id]["face_swap_url"] = face_swap_url
+
         # Step 1: Enhance with sdlx_enhance_image
-        progress_tracker[task_id] = "Enhancing with sdlx_enhance_image"
+        progress_tracker[task_id]["status"] = "Enhancing with sdlx_enhance_image"
         logger.debug(f"Initializing sdlx_enhance_image client for {image_path}")
         sdlx_client = Client(
             "habibahmad/sdlx_enhance_image",
@@ -193,6 +204,13 @@ async def high_quality_enhance(image_path: str, task_id: str) -> str:
             with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as temp_file:
                 temp_file.write(response.content)
                 temp_sdlx_output = temp_file.name
+            # Save sdlx result for logging
+            sdlx_filename = f"sdlx_{task_id}_{uuid.uuid4().hex}.png"
+            sdlx_path = os.path.join(CONFIG["OUTPUT_FOLDER"], sdlx_filename)
+            shutil.copy(temp_sdlx_output, sdlx_path)
+            sdlx_url = f"/static/output/{sdlx_filename}"
+            logger.info(f"sdlx_enhance_image output saved at: {sdlx_url}")
+            progress_tracker[task_id]["sdlx_url"] = sdlx_url
         else:
             # Assume local file path
             if not os.path.exists(sdlx_result) or not validate_image(sdlx_result):
@@ -201,9 +219,16 @@ async def high_quality_enhance(image_path: str, task_id: str) -> str:
             with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as temp_file:
                 shutil.copy(sdlx_result, temp_file.name)
                 temp_sdlx_output = temp_file.name
+            # Save sdlx result for logging
+            sdlx_filename = f"sdlx_{task_id}_{uuid.uuid4().hex}.png"
+            sdlx_path = os.path.join(CONFIG["OUTPUT_FOLDER"], sdlx_filename)
+            shutil.copy(sdlx_result, sdlx_path)
+            sdlx_url = f"/static/output/{sdlx_filename}"
+            logger.info(f"sdlx_enhance_image output saved at: {sdlx_url}")
+            progress_tracker[task_id]["sdlx_url"] = sdlx_url
         
         # Step 2: Enhance with CodeFormer
-        progress_tracker[task_id] = "Enhancing with CodeFormer"
+        progress_tracker[task_id]["status"] = "Enhancing with CodeFormer"
         logger.debug(f"Initializing CodeFormer client for {temp_sdlx_output}")
         codeformer_client = Client(
             "sczhou/CodeFormer",
@@ -232,23 +257,26 @@ async def high_quality_enhance(image_path: str, task_id: str) -> str:
             if not validate_image_url(codeformer_result):
                 logger.error(f"Invalid or inaccessible CodeFormer image URL: {codeformer_result}")
                 raise ValueError(f"Invalid or inaccessible CodeFormer image URL: {codeformer_result}")
-            logger.info(f"Returning CodeFormer enhanced image URL: {codeformer_result}")
-            return codeformer_result
+            logger.info(f"CodeFormer enhanced image URL: {codeformer_result}")
+            progress_tracker[task_id]["codeformer_url"] = codeformer_result
+            return face_swap_url, sdlx_url, codeformer_result
         else:
             # Assume local file path
             if not os.path.exists(codeformer_result) or not validate_image(codeformer_result):
                 logger.error(f"Invalid CodeFormer output: {codeformer_result}")
                 raise ValueError("Invalid CodeFormer output")
             # Move to output folder for serving
-            output_filename = f"enhanced_{uuid.uuid4().hex}.png"
+            output_filename = f"enhanced_{task_id}_{uuid.uuid4().hex}.png"
             output_path = os.path.join(CONFIG["OUTPUT_FOLDER"], output_filename)
             shutil.copy(codeformer_result, output_path)
-            output_url = f"/static/output/{output_filename}"
-            logger.info(f"Returning CodeFormer enhanced image URL: {output_url}")
-            return output_url
+            codeformer_url = f"/static/output/{output_filename}"
+            logger.info(f"CodeFormer enhanced image saved at: {codeformer_url}")
+            progress_tracker[task_id]["codeformer_url"] = codeformer_url
+            return face_swap_url, sdlx_url, codeformer_url
         
     except Exception as e:
         logger.error(f"Image enhancement pipeline failed for {image_path}: {str(e)}")
+        progress_tracker[task_id]["status"] = f"Error: {str(e)}"
         raise
     finally:
         if sdlx_client:
@@ -292,11 +320,12 @@ async def face_swap(
     temp_output_path = None
     try:
         logger.info(f"Starting face swap for task {task_id} with source: {source_image}, dest: {dest_image}")
+        progress_tracker[task_id] = {"status": "Starting", "face_swap_url": None, "sdlx_url": None, "codeformer_url": None}
         if not all([validate_image(source_image), validate_image(dest_image)]):
             logger.error(f"Invalid input files: {source_image}, {dest_image}")
             raise ValueError("Invalid input files")
 
-        progress_tracker[task_id] = "Initializing face swap"
+        progress_tracker[task_id]["status"] = "Initializing face swap"
         logger.debug(f"Initializing Gradio client for task {task_id}")
         try:
             client = Client(
@@ -309,11 +338,11 @@ async def face_swap(
             logger.error(f"Failed to initialize Gradio client: {str(e)}")
             raise HTTPException(500, detail=f"Gradio client initialization failed: {str(e)}")
 
-        progress_tracker[task_id] = "Detecting faces and processing swap"
+        progress_tracker[task_id]["status"] = "Detecting faces and processing swap"
         logger.debug(f"Starting face swap with dest_face_idx: {dest_face_idx}")
 
         logger.info(f"Trying face swap with destination face number {dest_face_idx}")
-        progress_tracker[task_id] = f"Trying face swap with destination face number {dest_face_idx}"
+        progress_tracker[task_id]["status"] = f"Trying face swap with destination face number {dest_face_idx}"
         try:
             with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as temp_output:
                 temp_output_path = temp_output.name
@@ -329,27 +358,33 @@ async def face_swap(
             logger.info(f"Gradio face swap returned: {result}")
             if result and os.path.exists(result) and validate_image(result):
                 shutil.copy(result, temp_output_path)
-                logger.info(f"Face swap succeeded, copied to {temp_output_path}")
-                progress_tracker[task_id] = f"Face swap succeeded"
+                # Save face swap result for logging
+                face_swap_filename = f"face_swap_{task_id}_{uuid.uuid4().hex}.png"
+                face_swap_path = os.path.join(CONFIG["OUTPUT_FOLDER"], face_swap_filename)
+                shutil.copy(result, face_swap_path)
+                face_swap_url = f"/static/output/{face_swap_filename}"
+                logger.info(f"Face swap image saved at: {face_swap_url}")
+                progress_tracker[task_id]["face_swap_url"] = face_swap_url
+                progress_tracker[task_id]["status"] = f"Face swap succeeded (URL: {face_swap_url})"
             else:
                 logger.error(f"Face swap failed or produced invalid result: {result}")
-                progress_tracker[task_id] = f"Face swap failed"
+                progress_tracker[task_id]["status"] = f"Face swap failed"
                 raise ValueError(f"Face swap failed for destination face index {dest_face_idx}")
         except Exception as e:
             logger.error(f"Face swap attempt failed: {str(e)}")
-            progress_tracker[task_id] = f"Face swap failed: {str(e)}"
+            progress_tracker[task_id]["status"] = f"Face swap failed: {str(e)}"
             raise
 
-        progress_tracker[task_id] = "Applying enhancement pipeline"
+        progress_tracker[task_id]["status"] = "Applying enhancement pipeline"
         logger.debug(f"Enhancing face swap result with sdlx_enhance_image and CodeFormer")
-        enhanced_output_url = await high_quality_enhance(temp_output_path, task_id)
+        face_swap_url, sdlx_url, codeformer_url = await high_quality_enhance(temp_output_path, task_id)
         
-        logger.info(f"Completed face swap (URL: {enhanced_output_url})")
-        progress_tracker[task_id] = f"Completed face swap (URL: {enhanced_output_url})"
-        return enhanced_output_url
+        logger.info(f"Completed face swap (Final URL: {codeformer_url})")
+        progress_tracker[task_id]["status"] = f"Completed face swap (Final URL: {codeformer_url})"
+        return codeformer_url
 
     except Exception as e:
-        progress_tracker[task_id] = f"Error: {str(e)}"
+        progress_tracker[task_id]["status"] = f"Error: {str(e)}"
         logger.error(f"Face swap failed: {str(e)}")
         raise
     finally:
@@ -394,7 +429,7 @@ async def swap_faces(
 ):
     start_time = time.time()
     task_id = str(uuid.uuid4())
-    progress_tracker[task_id] = "Starting"
+    progress_tracker[task_id] = {"status": "Starting", "face_swap_url": None, "sdlx_url": None, "codeformer_url": None}
     logger.info(f"Starting high-quality face swap task: {task_id}")
 
     try:
@@ -443,7 +478,7 @@ async def swap_faces(
 
     except HTTPException as e:
         logger.error(f"Face swap error: {str(e)}")
-        progress_tracker[task_id] = f"Error: {str(e)}"
+        progress_tracker[task_id]["status"] = f"Error: {str(e)}"
         return JSONResponse(
             status_code=e.status_code,
             content={"success": False, "data": None, "error": str(e.detail)},
@@ -451,7 +486,7 @@ async def swap_faces(
         )
     except Exception as e:
         logger.error(f"Face swap error: {str(e)}")
-        progress_tracker[task_id] = f"Error: {str(e)}"
+        progress_tracker[task_id]["status"] = f"Error: {str(e)}"
         return JSONResponse(
             status_code=500,
             content={"success": False, "data": None, "error": str(e)},
@@ -460,9 +495,15 @@ async def swap_faces(
 
 @app.get("/progress/{task_id}", description="Check progress of face swap task")
 async def get_progress(task_id: str):
-    status = progress_tracker.get(task_id, "Unknown task")
+    progress = progress_tracker.get(task_id, {"status": "Unknown task", "face_swap_url": None, "sdlx_url": None, "codeformer_url": None})
     return JSONResponse(
-        content={"task_id": task_id, "status": status},
+        content={
+            "task_id": task_id,
+            "status": progress["status"],
+            "face_swap_url": progress["face_swap_url"],
+            "sdlx_url": progress["sdlx_url"],
+            "codeformer_url": progress["codeformer_url"]
+        },
         headers={"Access-Control-Allow-Origin": "*"}
     )
 
@@ -474,7 +515,7 @@ async def shopify_face_swap(
 ):
     start_time = time.time()
     task_id = str(uuid.uuid4())
-    progress_tracker[task_id] = "Starting"
+    progress_tracker[task_id] = {"status": "Starting", "face_swap_url": None, "sdlx_url": None, "codeformer_url": None}
     logger.info(f"Starting Shopify face swap task: {task_id}")
 
     temp_file_path = None
@@ -500,7 +541,7 @@ async def shopify_face_swap(
             logger.error(f"Invalid user image format: {user_image.filename}")
             raise HTTPException(400, detail="Invalid user image format. Only PNG, JPG, JPEG, WEBP allowed")
 
-        progress_tracker[task_id] = "Downloading product image"
+        progress_tracker[task_id]["status"] = "Downloading product image"
         try:
             headers = {"Authorization": f"Bearer {CONFIG['HF_TOKEN']}"}
             response = requests.get(product_image_url, headers=headers, timeout=10)
@@ -536,7 +577,7 @@ async def shopify_face_swap(
             dest_face_idx = 3
         elif "REDKNIGHT.webp" in product_image_url:
             dest_face_idx = 4
-        elif any(filename in product_image_url for filename in ["DOCTOR.webp", "BOYCHEF1FINAL.webp", "police_investigator.webp", "CULINARY_GIRL.png", "fsoccer.webp","Pirate_7_1.webp"]):
+        elif any(filename in product_image_url for filename in ["DOCTOR.webp", "BOYCHEF1FINAL.webp", "police_investigator.webp", "CULINARY_GIRL.png", "fsoccer.webp", "Pirate_7_1.webp"]):
             dest_face_idx = 2
 
         cache_key = f"{get_file_hash(user_content)}:{get_file_hash(product_content)}:{dest_face_idx}"
@@ -568,7 +609,7 @@ async def shopify_face_swap(
 
     except HTTPException as e:
         logger.error(f"Shopify face swap error: {str(e)}")
-        progress_tracker[task_id] = f"Error: {str(e)}"
+        progress_tracker[task_id]["status"] = f"Error: {str(e)}"
         if temp_file_path and os.path.exists(temp_file_path):
             try:
                 os.unlink(temp_file_path)
@@ -582,7 +623,7 @@ async def shopify_face_swap(
         )
     except Exception as e:
         logger.error(f"Shopify face swap error: {str(e)}")
-        progress_tracker[task_id] = f"Error: {str(e)}"
+        progress_tracker[task_id]["status"] = f"Error: {str(e)}"
         if temp_file_path and os.path.exists(temp_file_path):
             try:
                 os.unlink(temp_file_path)
