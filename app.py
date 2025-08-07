@@ -189,7 +189,7 @@ async def high_quality_enhance(image_path: str, task_id: str, dest_image_path: s
             background_enhance=True,
             face_upsample=True,
             upscale=1,  # Set to 1 to avoid resizing
-            codeformer_fidelity=0.5,
+            codeformer_fidelity=0.8,
             api_name="/predict"
         )
         
