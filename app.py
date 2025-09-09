@@ -515,6 +515,51 @@ async def face_swap(
             except Exception as e:
                 logger.warning(f"Failed to close Gradio client: {str(e)}")
 
+# New endpoints to serve source and target images
+@app.get("/source-image/{task_id}")
+async def get_source_image(task_id: str):
+    """Serve the source image for a given task ID"""
+    try:
+        conn = sqlite3.connect("face_swap_data.db")
+        cursor = conn.cursor()
+        cursor.execute("SELECT source_image_path FROM face_swap_records WHERE task_id = ?", (task_id,))
+        row = cursor.fetchone()
+        conn.close()
+        if not row or not row[0]:
+            raise HTTPException(404, detail="Source image not found")
+        if not os.path.exists(row[0]):
+            raise HTTPException(404, detail="Source image file missing")
+        return FileResponse(
+            row[0],
+            media_type="image/png",
+            headers={"Access-Control-Allow-Origin": "*"}
+        )
+    except Exception as e:
+        logger.error(f"Failed to serve source image: {str(e)}")
+        raise HTTPException(500, detail=str(e))
+
+@app.get("/target-image/{task_id}")
+async def get_target_image(task_id: str):
+    """Serve the target image for a given task ID"""
+    try:
+        conn = sqlite3.connect("face_swap_data.db")
+        cursor = conn.cursor()
+        cursor.execute("SELECT target_image_path FROM face_swap_records WHERE task_id = ?", (task_id,))
+        row = cursor.fetchone()
+        conn.close()
+        if not row or not row[0]:
+            raise HTTPException(404, detail="Target image not found")
+        if not os.path.exists(row[0]):
+            raise HTTPException(404, detail="Target image file missing")
+        return FileResponse(
+            row[0],
+            media_type="image/png",
+            headers={"Access-Control-Allow-Origin": "*"}
+        )
+    except Exception as e:
+        logger.error(f"Failed to serve target image: {str(e)}")
+        raise HTTPException(500, detail=str(e))
+
 # API Endpoints
 
 @app.get("/health")
@@ -536,12 +581,12 @@ async def cors_preflight():
     )
 
 @app.get("/")
-async def index(request: Request):
+async def index(request: Request, task_id: str = None):
     try:
         templates = Jinja2Templates(directory="templates")
         return templates.TemplateResponse(
             "index.html",
-            {"request": request, "result_image": None, "version": app.version}
+            {"request": request, "result_image": None, "version": app.version, "task_id": task_id}
         )
     except Exception:
         # Fallback response if templates not found
