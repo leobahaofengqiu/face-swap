@@ -7,17 +7,27 @@
     <style>
         body {
             font-family: Arial, sans-serif;
-            max-width: 800px;
+            max-width: 1200px;
             margin: 0 auto;
             padding: 20px;
+            background-color: #f4f4f4;
         }
         h1 {
             text-align: center;
+            color: #333;
+        }
+        h2 {
+            color: #333;
+            margin-top: 30px;
         }
         form {
             display: flex;
             flex-direction: column;
             gap: 15px;
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
         }
         button {
             padding: 10px;
@@ -26,19 +36,28 @@
             border: none;
             cursor: pointer;
             font-size: 16px;
+            border-radius: 4px;
         }
         button:hover {
             background-color: #0056b3;
         }
-        #result, #error {
+        input[type="file"], input[type="text"] {
+            padding: 10px;
+            font-size: 16px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
+        #result, #error, #view-error {
             margin-top: 20px;
         }
-        #error {
+        #error, #view-error {
             color: red;
+            text-align: center;
         }
         img {
             max-width: 100%;
             border: 1px solid #ddd;
+            border-radius: 4px;
         }
         .loader {
             display: none;
@@ -54,10 +73,42 @@
             0% { transform: rotate(0deg); }
             100% { transform: rotate(360deg); }
         }
+        .image-container {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 20px;
+            justify-content: center;
+            margin-top: 20px;
+        }
+        .image-card {
+            background-color: white;
+            padding: 10px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+            text-align: center;
+            width: 250px;
+        }
+        .image-card img {
+            max-width: 100%;
+            height: auto;
+            border-radius: 4px;
+        }
+        .image-card p {
+            margin: 10px 0 0;
+            font-weight: bold;
+            color: #333;
+        }
+        .view-images {
+            margin: 30px 0;
+            text-align: center;
+        }
     </style>
 </head>
 <body>
     <h1>Face Swap Application</h1>
+    
+    <!-- Upload Form -->
+    <h2>Upload Images for Face Swap</h2>
     <form id="swap-form">
         <label for="source_image">Source Image:</label>
         <input type="file" id="source_image" name="source_image" accept="image/png,image/jpeg" required><br><br>
@@ -69,7 +120,17 @@
     <div id="result"></div>
     <div id="error"></div>
 
+    <!-- View Images by Task ID -->
+    <h2>View Images by Task ID</h2>
+    <div class="view-images">
+        <input type="text" id="taskIdInput" placeholder="Enter Task ID (e.g., 4ae34675-5033-4feb-b1ae-c7b390d82de3)">
+        <button onclick="fetchImages()">View Images</button>
+    </div>
+    <div id="view-error"></div>
+    <div class="image-container" id="imageContainer"></div>
+
     <script>
+        // Upload Form Submission
         document.getElementById('swap-form').addEventListener('submit', async (event) => {
             event.preventDefault(); // Prevent form reload
             console.log('Form submitted');
@@ -96,7 +157,14 @@
                 console.log('Response data:', data);
 
                 if (data.success) {
-                    resultDiv.innerHTML = `<h2>Result:</h2><img src="${data.data.result_image}" alt="Face Swap Result">`;
+                    resultDiv.innerHTML = `
+                        <h3>Result (Task ID: ${data.data.task_id})</h3>
+                        <p>Enhanced Image:</p>
+                        <img src="${data.data.result_image}" alt="Face Swap Result">
+                        <p>Face Swap Image:</p>
+                        <img src="${data.data.face_swap_url}" alt="Face Swap Output">
+                    `;
+                    document.getElementById('taskIdInput').value = data.data.task_id; // Pre-fill task ID
                 } else {
                     errorDiv.textContent = `Error: ${data.error}`;
                     console.error('API error:', data.error);
@@ -108,6 +176,52 @@
                 loader.style.display = 'none'; // Hide loader
             }
         });
+
+        // Fetch and Display Images by Task ID
+        async function fetchImages() {
+            const taskId = document.getElementById('taskIdInput').value.trim();
+            const imageContainer = document.getElementById('imageContainer');
+            const viewError = document.getElementById('view-error');
+            imageContainer.innerHTML = '';
+            viewError.textContent = '';
+
+            if (!taskId) {
+                viewError.textContent = 'Please enter a valid Task ID';
+                return;
+            }
+
+            try {
+                const response = await fetch(`/records/${taskId}`);
+                const data = await response.json();
+
+                if (!data.success || !data.data) {
+                    viewError.textContent = 'Task ID not found or invalid';
+                    return;
+                }
+
+                const record = data.data;
+                const images = [
+                    { url: `/source-image/${taskId}`, label: 'Source Image' },
+                    { url: `/target-image/${taskId}`, label: 'Target Image' },
+                    { url: record.face_swap_output_path, label: 'Face Swap Output' },
+                    { url: record.enhanced_output_path, label: 'Enhanced Output' }
+                ];
+
+                images.forEach(image => {
+                    if (image.url) {
+                        const card = document.createElement('div');
+                        card.className = 'image-card';
+                        card.innerHTML = `
+                            <img src="${image.url}" alt="${image.label}" onerror="this.alt='Image not available'">
+                            <p>${image.label}</p>
+                        `;
+                        imageContainer.appendChild(card);
+                    }
+                });
+            } catch (error) {
+                viewError.textContent = 'Error fetching images: ' + error.message;
+            }
+        }
     </script>
 </body>
 </html>
