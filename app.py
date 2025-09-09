@@ -10,7 +10,7 @@ from typing import Optional, Dict, Tuple, List
 from fastapi import FastAPI, File, UploadFile, Request, BackgroundTasks, HTTPException, Form
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image
 from cachetools import TTLCache
@@ -592,3 +592,21 @@ async def shopify_face_swap(
             content={"success": False, "data": None, "error": str(e)},
             headers={"Access-Control-Allow-Origin": "*"}
         )
+
+@app.get("/download-outputs", description="Download all generated output images as a zip")
+def download_outputs():
+    output_dir = CONFIG["OUTPUT_FOLDER"]   # yaha pe hai: static/output
+    zip_path = "outputs.zip"
+
+    # Purana zip delete kar do agar exist karta hai
+    if os.path.exists(zip_path):
+        os.remove(zip_path)
+
+    # static/output ko zip me compress karo
+    shutil.make_archive("outputs", 'zip', output_dir)
+
+    return FileResponse(
+        zip_path,
+        media_type='application/zip',
+        filename="outputs.zip"
+    )
