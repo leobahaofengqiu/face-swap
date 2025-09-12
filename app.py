@@ -671,13 +671,33 @@ async def swap_faces(
 
 @app.get("/progress/{task_id}")
 async def get_progress(task_id: str):
+    """Get progress of a face swap task with timestamps"""
+    try:
+        conn = sqlite3.connect("face_swap_data.db")
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT created_at, updated_at FROM face_swap_records WHERE task_id = ?
+        """, (task_id,))
+        row = cursor.fetchone()
+        conn.close()
+        created_time = row[0] if row else None
+        updated_time = row[1] if row else None
+    except Exception as e:
+        logger.error(f"Failed to fetch timestamps for task {task_id}: {str(e)}")
+        created_time = updated_time = None
+    
     progress = progress_tracker.get(task_id, {"status": "Unknown task", "face_swap_url": None, "codeformer_url": None})
+    progress["created_at"] = created_time
+    progress["updated_at"] = updated_time
+    
     return JSONResponse(
         content={
             "task_id": task_id,
             "status": progress["status"],
             "face_swap_url": progress["face_swap_url"],
-            "codeformer_url": progress["codeformer_url"]
+            "codeformer_url": progress["codeformer_url"],
+            "created_at": progress["created_at"],
+            "updated_at": progress["updated_at"]
         },
         headers={"Access-Control-Allow-Origin": "*"}
     )
@@ -818,8 +838,18 @@ async def shopify_face_swap(
 
 # New endpoints for data management
 @app.get("/records")
+async def records_page(request: Request, limit: int = 50):
+    """Render face swap records page"""
+    records = get_face_swap_records(limit)
+    templates = Jinja2Templates(directory="templates")
+    return templates.TemplateResponse(
+        "records.html",
+        {"request": request, "records": records, "version": app.version}
+    )
+
+@app.get("/api/records")
 async def get_records(limit: int = 100):
-    """Get face swap records from database"""
+    """Get face swap records from database (JSON API)"""
     records = get_face_swap_records(limit)
     return JSONResponse({
         "success": True,
@@ -946,7 +976,7 @@ if __name__ == "__main__":
     
     logger.info(f"Starting server on {host}:{port}")
     uvicorn.run(
-        "main:app",  # Change this to your actual file name if different
+        "main:app",
         host=host,
         port=port,
         reload=False,  # Don't use reload in production
