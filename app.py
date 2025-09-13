@@ -69,7 +69,7 @@ def init_database():
     db_path = "face_swap_data.db"
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
-    
+#database creation
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS face_swap_records (
             id TEXT PRIMARY KEY,
