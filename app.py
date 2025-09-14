@@ -7,6 +7,7 @@ import logging
 import requests
 import json
 from datetime import datetime
+import pytz
 from pathlib import Path
 from typing import Optional, Dict, Tuple, List
 from fastapi import FastAPI, File, UploadFile, Request, BackgroundTasks, HTTPException, Form
@@ -22,16 +23,23 @@ import asyncio
 import shutil
 import sqlite3
 from dotenv import load_dotenv
+from logging import Formatter
 
 # Load environment variables
 load_dotenv()
 
-# Configure logging
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+# Configure logging with China Standard Time
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+cst_tz = pytz.timezone('Asia/Shanghai')
+formatter = Formatter(
+    fmt='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S %Z'
+)
+formatter.converter = lambda *args: datetime.now(cst_tz).timetuple()
+handler = logging.StreamHandler()
+handler.setFormatter(formatter)
+logger.addHandler(handler)
 
 app = FastAPI(title="High-Quality Face Swap API", version="2.3.0")
 
@@ -69,7 +77,6 @@ def init_database():
     db_path = "face_swap_data.db"
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
-#database creation
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS face_swap_records (
             id TEXT PRIMARY KEY,
@@ -84,12 +91,11 @@ def init_database():
             processing_time REAL,
             status TEXT DEFAULT 'pending',
             error_message TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            metadata TEXT  -- JSON string for additional data
+            created_at TEXT,
+            updated_at TEXT,
+            metadata TEXT
         )
     """)
-    
     conn.commit()
     conn.close()
     logger.info("Database initialized successfully")
@@ -98,17 +104,19 @@ def init_database():
 init_database()
 
 def save_face_swap_record(task_id: str, data: Dict):
-    """Save face swap record to database"""
+    """Save face swap record to database with CST timestamps"""
     try:
         conn = sqlite3.connect("face_swap_data.db")
         cursor = conn.cursor()
+        cst_tz = pytz.timezone('Asia/Shanghai')
+        current_time = datetime.now(cst_tz).strftime('%Y-%m-%d %H:%M:%S')
         
         cursor.execute("""
             INSERT OR REPLACE INTO face_swap_records 
             (id, task_id, source_image_path, target_image_path, face_swap_output_path, 
              enhanced_output_path, source_image_hash, target_image_hash, dest_face_idx,
-             processing_time, status, error_message, metadata, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+             processing_time, status, error_message, metadata, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             str(uuid.uuid4()),
             task_id,
@@ -122,9 +130,10 @@ def save_face_swap_record(task_id: str, data: Dict):
             data.get('processing_time'),
             data.get('status', 'completed'),
             data.get('error_message'),
-            json.dumps(data.get('metadata', {}))
+            json.dumps(data.get('metadata', {})),
+            current_time,
+            current_time
         ))
-        
         conn.commit()
         conn.close()
         logger.info(f"Face swap record saved for task: {task_id}")
@@ -475,7 +484,7 @@ async def face_swap(
             'metadata': {
                 'gradio_result': result,
                 'enhancement_applied': True,
-                'original_dimensions': None  # You can add image dimensions here
+                'original_dimensions': None
             }
         }
         
@@ -561,11 +570,14 @@ async def get_target_image(task_id: str):
         raise HTTPException(500, detail=str(e))
 
 # API Endpoints
-
 @app.get("/health")
 async def health_check():
     """Health check endpoint for Railway"""
-    return {"status": "healthy", "timestamp": datetime.now().isoformat()}
+    cst_tz = pytz.timezone('Asia/Shanghai')
+    return {
+        "status": "healthy",
+        "timestamp": datetime.now(cst_tz).isoformat()
+    }
 
 @app.options("/shopify-face-swap")
 async def cors_preflight():
@@ -589,7 +601,6 @@ async def index(request: Request, task_id: str = None):
             {"request": request, "result_image": None, "version": app.version, "task_id": task_id}
         )
     except Exception:
-        # Fallback response if templates not found
         return JSONResponse({"message": "Face Swap API is running", "version": app.version})
 
 @app.post("/swap")
@@ -979,6 +990,6 @@ if __name__ == "__main__":
         "main:app",
         host=host,
         port=port,
-        reload=False,  # Don't use reload in production
+        reload=False,
         log_level="info"
     )
