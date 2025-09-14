@@ -11,3 +11,4 @@ numpy
 opencv-python
 jinja2
 python-dotenv
+pytz
