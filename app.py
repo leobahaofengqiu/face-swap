@@ -53,11 +53,11 @@ app.add_middleware(
     expose_headers=["X-Process-Time"],
 )
 
-# Configuration for Railway with persistent storage
+# Configuration for Railway
 CONFIG = {
-    "UPLOAD_FOLDER": os.getenv("UPLOAD_FOLDER", "/app/data/uploads"),
-    "OUTPUT_FOLDER": os.getenv("OUTPUT_FOLDER", "/app/data/output"),
-    "DATA_FOLDER": os.getenv("DATA_FOLDER", "/app/data"),
+    "UPLOAD_FOLDER": os.getenv("UPLOAD_FOLDER", "static/uploads"),
+    "OUTPUT_FOLDER": os.getenv("OUTPUT_FOLDER", "static/output"),
+    "DATA_FOLDER": os.getenv("DATA_FOLDER", "data"),
     "STATIC_DIR": "static",
     "ALLOWED_EXTENSIONS": {'png', 'jpg', 'jpeg', 'webp'},
     "MAX_FILE_SIZE": int(os.getenv("MAX_FILE_SIZE", 30 * 1024 * 1024)),  # 30MB
@@ -68,14 +68,13 @@ CONFIG = {
     "GRADIO_TIMEOUT": int(os.getenv("GRADIO_TIMEOUT", 120)),
     "HF_TOKEN": os.getenv("HF_TOKEN"),
     "PORT": int(os.getenv("PORT", 8000)),  # Railway port
-    "DATABASE_PATH": os.getenv("DATABASE_PATH", "/app/data/face_swap_data.db")
+    "DATABASE_URL": os.getenv("DATABASE_URL", "sqlite:///./face_swap_data.db")
 }
 
 # Database setup
 def init_database():
     """Initialize SQLite database for storing face swap data"""
-    db_path = CONFIG["DATABASE_PATH"]
-    os.makedirs(os.path.dirname(db_path), exist_ok=True)  # Ensure directory exists
+    db_path = "face_swap_data.db"
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
     cursor.execute("""
@@ -99,7 +98,7 @@ def init_database():
     """)
     conn.commit()
     conn.close()
-    logger.info("Database initialized successfully at %s", db_path)
+    logger.info("Database initialized successfully")
 
 # Initialize database on startup
 init_database()
@@ -107,7 +106,7 @@ init_database()
 def save_face_swap_record(task_id: str, data: Dict):
     """Save face swap record to database with CST timestamps"""
     try:
-        conn = sqlite3.connect(CONFIG["DATABASE_PATH"])
+        conn = sqlite3.connect("face_swap_data.db")
         cursor = conn.cursor()
         cst_tz = pytz.timezone('Asia/Shanghai')
         current_time = datetime.now(cst_tz).strftime('%Y-%m-%d %H:%M:%S')
@@ -144,7 +143,7 @@ def save_face_swap_record(task_id: str, data: Dict):
 def get_face_swap_records(limit: int = 100):
     """Get face swap records from database"""
     try:
-        conn = sqlite3.connect(CONFIG["DATABASE_PATH"])
+        conn = sqlite3.connect("face_swap_data.db")
         cursor = conn.cursor()
         
         cursor.execute("""
@@ -264,7 +263,6 @@ def save_permanent_image(content: bytes, filename: str, folder: str) -> str:
     """Save image permanently and return relative path"""
     try:
         file_path = os.path.join(folder, filename)
-        os.makedirs(os.path.dirname(file_path), exist_ok=True)  # Ensure directory exists
         with open(file_path, "wb") as f:
             f.write(content)
         return file_path
@@ -282,7 +280,6 @@ async def high_quality_enhance(image_path: str, task_id: str, dest_image_path: s
         # Save face swap result
         face_swap_filename = f"face_swap_{task_id}_{uuid.uuid4().hex}.png"
         face_swap_path = os.path.join(CONFIG["OUTPUT_FOLDER"], face_swap_filename)
-        os.makedirs(os.path.dirname(face_swap_path), exist_ok=True)
         shutil.copy(image_path, face_swap_path)
         face_swap_url = f"/static/output/{face_swap_filename}"
         logger.info(f"Face swap image saved at: {face_swap_url}")
@@ -333,7 +330,6 @@ async def high_quality_enhance(image_path: str, task_id: str, dest_image_path: s
                 img = img.resize((original_width, original_height), Image.Resampling.LANCZOS)
                 output_filename = f"enhanced_{task_id}_{uuid.uuid4().hex}.png"
                 output_path = os.path.join(CONFIG["OUTPUT_FOLDER"], output_filename)
-                os.makedirs(os.path.dirname(output_path), exist_ok=True)
                 img.save(output_path, format="PNG")
             
             os.unlink(temp_file_path)
@@ -350,7 +346,6 @@ async def high_quality_enhance(image_path: str, task_id: str, dest_image_path: s
                 img = img.resize((original_width, original_height), Image.Resampling.LANCZOS)
                 output_filename = f"enhanced_{task_id}_{uuid.uuid4().hex}.png"
                 output_path = os.path.join(CONFIG["OUTPUT_FOLDER"], output_filename)
-                os.makedirs(os.path.dirname(output_path), exist_ok=True)
                 img.save(output_path, format="PNG")
             
             codeformer_url = f"/static/output/{output_filename}"
@@ -454,7 +449,6 @@ async def face_swap(
                 
                 face_swap_filename = f"face_swap_{task_id}_{uuid.uuid4().hex}.png"
                 face_swap_path = os.path.join(CONFIG["OUTPUT_FOLDER"], face_swap_filename)
-                os.makedirs(os.path.dirname(face_swap_path), exist_ok=True)
                 shutil.copy(result, face_swap_path)
                 face_swap_url = f"/static/output/{face_swap_filename}"
                 logger.info(f"Face swap image saved at: {face_swap_url}")
@@ -535,7 +529,7 @@ async def face_swap(
 async def get_source_image(task_id: str):
     """Serve the source image for a given task ID"""
     try:
-        conn = sqlite3.connect(CONFIG["DATABASE_PATH"])
+        conn = sqlite3.connect("face_swap_data.db")
         cursor = conn.cursor()
         cursor.execute("SELECT source_image_path FROM face_swap_records WHERE task_id = ?", (task_id,))
         row = cursor.fetchone()
@@ -557,7 +551,7 @@ async def get_source_image(task_id: str):
 async def get_target_image(task_id: str):
     """Serve the target image for a given task ID"""
     try:
-        conn = sqlite3.connect(CONFIG["DATABASE_PATH"])
+        conn = sqlite3.connect("face_swap_data.db")
         cursor = conn.cursor()
         cursor.execute("SELECT target_image_path FROM face_swap_records WHERE task_id = ?", (task_id,))
         row = cursor.fetchone()
@@ -690,7 +684,7 @@ async def swap_faces(
 async def get_progress(task_id: str):
     """Get progress of a face swap task with timestamps"""
     try:
-        conn = sqlite3.connect(CONFIG["DATABASE_PATH"])
+        conn = sqlite3.connect("face_swap_data.db")
         cursor = conn.cursor()
         cursor.execute("""
             SELECT created_at, updated_at FROM face_swap_records WHERE task_id = ?
@@ -878,7 +872,7 @@ async def get_records(limit: int = 100):
 async def get_record_by_task_id(task_id: str):
     """Get specific face swap record by task_id"""
     try:
-        conn = sqlite3.connect(CONFIG["DATABASE_PATH"])
+        conn = sqlite3.connect("face_swap_data.db")
         cursor = conn.cursor()
         
         cursor.execute("""
@@ -909,12 +903,12 @@ async def get_record_by_task_id(task_id: str):
 def download_outputs():
     """Download all generated output images as a zip"""
     output_dir = CONFIG["OUTPUT_FOLDER"]
-    zip_path = os.path.join(CONFIG["DATA_FOLDER"], "outputs.zip")
+    zip_path = "outputs.zip"
 
     if os.path.exists(zip_path):
         os.remove(zip_path)
 
-    shutil.make_archive(os.path.join(CONFIG["DATA_FOLDER"], "outputs"), 'zip', output_dir)
+    shutil.make_archive("outputs", 'zip', output_dir)
 
     return FileResponse(
         zip_path,
@@ -925,7 +919,7 @@ def download_outputs():
 @app.get("/download-data")
 def download_data():
     """Download database and data folder as a zip"""
-    zip_path = os.path.join(CONFIG["DATA_FOLDER"], "face_swap_data.zip")
+    zip_path = "face_swap_data.zip"
     
     if os.path.exists(zip_path):
         os.remove(zip_path)
@@ -933,8 +927,8 @@ def download_data():
     # Create temporary directory for packaging
     with tempfile.TemporaryDirectory() as temp_dir:
         # Copy database
-        if os.path.exists(CONFIG["DATABASE_PATH"]):
-            shutil.copy(CONFIG["DATABASE_PATH"], os.path.join(temp_dir, "face_swap_data.db"))
+        if os.path.exists("face_swap_data.db"):
+            shutil.copy("face_swap_data.db", os.path.join(temp_dir, "face_swap_data.db"))
         
         # Copy data folder
         if os.path.exists(CONFIG["DATA_FOLDER"]):
@@ -945,7 +939,7 @@ def download_data():
             shutil.copytree(CONFIG["OUTPUT_FOLDER"], os.path.join(temp_dir, "output"))
         
         # Create zip
-        shutil.make_archive(os.path.join(CONFIG["DATA_FOLDER"], "face_swap_data"), 'zip', temp_dir)
+        shutil.make_archive("face_swap_data", 'zip', temp_dir)
     
     return FileResponse(
         zip_path,
